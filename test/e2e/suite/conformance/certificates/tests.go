@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -35,19 +35,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/helper/featureset"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/helper/validation"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/helper/validation/certificates"
+	e2eutil "github.com/cert-manager/cert-manager/e2e-tests/util"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util"
 	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/featureset"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/validation"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/validation/certificates"
-	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
 )
 
 // Define defines simple conformance tests that can be run against any issuer type.
@@ -266,7 +266,7 @@ func (s *Suite) Define() {
 					return err
 				}
 
-				rdnSeq, err2 := pki.ParseSubjectStringToRdnSequence(literalSubject)
+				rdnSeq, err2 := pki.UnmarshalSubjectStringToRDNSequence(literalSubject)
 
 				if err2 != nil {
 					return err2
@@ -786,7 +786,7 @@ func (s *Suite) Define() {
 			domain := e2eutil.RandomSubdomain(s.DomainSuffix)
 			duration := time.Hour * 999
 			renewBefore := time.Hour * 111
-			revisionHistoryLimit := pointer.Int32(7)
+			revisionHistoryLimit := ptr.To(int32(7))
 			privateKeyAlgorithm := cmapi.RSAKeyAlgorithm
 			privateKeyEncoding := cmapi.PKCS1
 			privateKeySize := 4096
@@ -897,7 +897,7 @@ func (s *Suite) Define() {
 				"cert-manager.io/renew-before": renewBefore.String(),
 			}, domain)
 
-			gw, err := f.GWClientSet.GatewayV1alpha2().Gateways(f.Namespace.Name).Create(context.TODO(), gw, metav1.CreateOptions{})
+			gw, err := f.GWClientSet.GatewayV1beta1().Gateways(f.Namespace.Name).Create(context.TODO(), gw, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			// XXX(Mael): the CertificateRef seems to contain the Gateway name

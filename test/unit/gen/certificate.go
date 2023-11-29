@@ -225,6 +225,12 @@ func SetCertificateGeneration(gen int64) CertificateModifier {
 	}
 }
 
+func SetCertificateCreationTimestamp(creationTimestamp metav1.Time) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.ObjectMeta.CreationTimestamp = creationTimestamp
+	}
+}
+
 func AddCertificateAnnotations(annotations map[string]string) CertificateModifier {
 	return func(crt *v1.Certificate) {
 		if crt.Annotations == nil {
@@ -256,8 +262,8 @@ func AddCertificateLabels(labels map[string]string) CertificateModifier {
 // about the UID. The apiVersion, kind and name are only used for information
 // purposes.
 //
-//  [1]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/types.go#L273-L275
-//  [2]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/controller_ref.go#L29
+//	[1]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/types.go#L273-L275
+//	[2]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/controller_ref.go#L29
 func CertificateRef(certName, certUID string) metav1.OwnerReference {
 	return *metav1.NewControllerRef(
 		Certificate(certName,

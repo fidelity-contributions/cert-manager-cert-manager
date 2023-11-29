@@ -25,8 +25,8 @@ import (
 
 	"github.com/pkg/errors"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	corev1listers "k8s.io/client-go/listers/core/v1"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
 	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
@@ -62,7 +62,7 @@ type dnsProviderConstructors struct {
 	route53      func(accessKey, secretKey, hostedZoneID, region, role string, ambient bool, dns01Nameservers []string, userAgent string) (*route53.DNSProvider, error)
 	azureDNS     func(environment, clientID, clientSecret, subscriptionID, tenantID, resourceGroupName, hostedZoneName string, dns01Nameservers []string, ambient bool, managedIdentity *cmacme.AzureManagedIdentity) (*azuredns.DNSProvider, error)
 	acmeDNS      func(host string, accountJson []byte, dns01Nameservers []string) (*acmedns.DNSProvider, error)
-	digitalOcean func(token string, dns01Nameservers []string) (*digitalocean.DNSProvider, error)
+	digitalOcean func(token string, dns01Nameservers []string, userAgent string) (*digitalocean.DNSProvider, error)
 }
 
 // Solver is a solver for the acme dns01 challenge.
@@ -70,7 +70,7 @@ type dnsProviderConstructors struct {
 // the certificate, and configures it based on the referenced issuer.
 type Solver struct {
 	*controller.Context
-	secretLister            corev1listers.SecretLister
+	secretLister            internalinformers.SecretLister
 	dnsProviderConstructors dnsProviderConstructors
 	webhookSolvers          map[string]webhook.Solver
 }
@@ -286,7 +286,7 @@ func (s *Solver) solverForChallenge(ctx context.Context, issuer v1.GenericIssuer
 
 		apiToken := string(apiTokenSecret.Data[providerConfig.DigitalOcean.Token.Key])
 
-		impl, err = s.dnsProviderConstructors.digitalOcean(strings.TrimSpace(apiToken), s.DNS01Nameservers)
+		impl, err = s.dnsProviderConstructors.digitalOcean(strings.TrimSpace(apiToken), s.DNS01Nameservers, s.RESTConfig.UserAgent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error instantiating digitalocean challenge solver: %s", err.Error())
 		}
@@ -488,9 +488,10 @@ func (s *Solver) dns01SolverForConfig(config *cmacme.ACMEChallengeSolverDNS01) (
 // NewSolver creates a Solver which can instantiate the appropriate DNS
 // provider.
 func NewSolver(ctx *controller.Context) (*Solver, error) {
+	secretsLister := ctx.KubeSharedInformerFactory.Secrets().Lister()
 	webhookSolvers := []webhook.Solver{
 		&webhookslv.Webhook{},
-		rfc2136.New(rfc2136.WithNamespace(ctx.Namespace)),
+		rfc2136.New(rfc2136.WithNamespace(ctx.Namespace), rfc2136.WithSecretsLister(secretsLister)),
 	}
 
 	initialized := make(map[string]webhook.Solver)
@@ -510,7 +511,7 @@ func NewSolver(ctx *controller.Context) (*Solver, error) {
 
 	return &Solver{
 		Context:      ctx,
-		secretLister: ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+		secretLister: ctx.KubeSharedInformerFactory.Secrets().Lister(),
 		dnsProviderConstructors: dnsProviderConstructors{
 			clouddns.NewDNSProvider,
 			cloudflare.NewDNSProviderCredentials,

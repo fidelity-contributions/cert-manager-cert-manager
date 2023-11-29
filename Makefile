@@ -1,4 +1,4 @@
-# Copyright 2022 The cert-manager Authors.
+# Copyright 2023 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ include make/util.mk
 # the make dir.
 # NB: we skip `bin/` since users might have a `bin` directory left over in repos they were
 # using before the bin dir was renamed
-SOURCES := $(call get-sources,cat -)
+SOURCES := $(call get-sources,cat -) go.mod go.sum
 
 ## GOBUILDPROCS is passed to GOMAXPROCS when running go build; if you're running
 ## make in parallel using "-jN" then you'll probably want to reduce the value
@@ -69,7 +69,9 @@ include make/release.mk
 include make/manifests.mk
 include make/licenses.mk
 include make/e2e-setup.mk
+include make/scan.mk
 include make/legacy.mk
+include make/ko.mk
 include make/help.mk
 
 .PHONY: clean
@@ -78,9 +80,9 @@ include make/help.mk
 ## out everything, use `make clean-all` instead.
 ##
 ## @category Development
-clean:
+clean: | $(NEEDS_KIND)
 	@$(eval KIND_CLUSTER_NAME ?= kind)
-	$(BINDIR)/tools/kind delete cluster --name=$(shell cat $(BINDIR)/scratch/kind-exists 2>/dev/null || echo $(KIND_CLUSTER_NAME)) -q 2>/dev/null || true
+	$(KIND) delete cluster --name=$(shell cat $(BINDIR)/scratch/kind-exists 2>/dev/null || echo $(KIND_CLUSTER_NAME)) -q 2>/dev/null || true
 	rm -rf $(filter-out $(BINDIR)/downloaded,$(wildcard $(BINDIR)/*))
 	rm -rf bazel-bin bazel-cert-manager bazel-out bazel-testlogs
 

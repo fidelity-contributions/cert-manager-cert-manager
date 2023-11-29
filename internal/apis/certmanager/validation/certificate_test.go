@@ -142,6 +142,19 @@ func TestValidateCertificate(t *testing.T) {
 			},
 			a: someAdmissionRequest,
 		},
+		"certificate invalid secretName": {
+			cfg: &internalcmapi.Certificate{
+				Spec: internalcmapi.CertificateSpec{
+					CommonName: "testcn",
+					IssuerRef:  validIssuerRef,
+					SecretName: "testFoo",
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("secretName"), "testFoo", "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')"),
+			},
+			a: someAdmissionRequest,
+		},
 		"certificate with no domains, URIs or common name": {
 			cfg: &internalcmapi.Certificate{
 				Spec: internalcmapi.CertificateSpec{
@@ -938,6 +951,18 @@ func Test_validateLiteralSubject(t *testing.T) {
 				Spec: internalcmapi.CertificateSpec{
 					Subject:        &internalcmapi.X509Subject{SerialNumber: "1"},
 					LiteralSubject: "CN=testcn",
+					SecretName:     "abc",
+					IssuerRef:      validIssuerRef,
+				},
+			},
+			a: someAdmissionRequest,
+		},
+		"valid with a `literalSubject` containing CN with special characters, multiple DC and well-known rfc4514 and rfc5280 RDN OIDs": {
+			featureEnabled: true,
+			cfg: &internalcmapi.Certificate{
+				Spec: internalcmapi.CertificateSpec{
+					Subject:        &internalcmapi.X509Subject{SerialNumber: "1"},
+					LiteralSubject: "CN=James \\\"Jim\\\" Smith\\, III,DC=dc,DC=net,UID=jamessmith,STREET=La Rambla,L=Barcelona,C=Spain,O=Acme,OU=IT,OU=Admins",
 					SecretName:     "abc",
 					IssuerRef:      validIssuerRef,
 				},

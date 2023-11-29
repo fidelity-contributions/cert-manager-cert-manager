@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	api "k8s.io/api/core/v1"
@@ -33,29 +33,19 @@ import (
 	"k8s.io/client-go/rest"
 	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
-	gwapi "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned"
+	gwapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/addon"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/config"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/helper"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/util"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/util/errors"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	certmgrscheme "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/scheme"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/addon"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/config"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/helper"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/util"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/util/errors"
 )
-
-// TODO: this really should be done somewhere in cert-manager proper
-var Scheme = runtime.NewScheme()
-
-func init() {
-	kscheme.AddToScheme(Scheme)
-	certmgrscheme.AddToScheme(Scheme)
-	apiext.AddToScheme(Scheme)
-	apireg.AddToScheme(Scheme)
-}
 
 // DefaultConfig contains the default shared config the is likely parsed from
 // command line arguments.
@@ -69,10 +59,12 @@ type Framework struct {
 
 	// KubeClientConfig which was used to create the connection.
 	KubeClientConfig *rest.Config
+	// Scheme which is used to encode/decode kubernetes objects.
+	Scheme *runtime.Scheme
 
 	// Kubernetes API clientsets
 	KubeClientSet          kubernetes.Interface
-	GWClientSet            gwapi.Interface
+	GWClientSet            gwapiclient.Interface
 	CertManagerClientSet   clientset.Interface
 	APIExtensionsClientSet apiextcs.Interface
 
@@ -93,7 +85,7 @@ type Framework struct {
 
 // NewDefaultFramework makes a new framework for you, similar to NewFramework.
 // It uses the suite-wide 'DefaultConfig' which should be populated by the
-// testing harness in test/e2e/e2e_test.go
+// testing harness in e2e-tests/e2e_test.go
 func NewDefaultFramework(baseName string) *Framework {
 	return NewFramework(baseName, DefaultConfig)
 }
@@ -102,9 +94,16 @@ func NewDefaultFramework(baseName string) *Framework {
 // you (you can write additional before/after each functions).
 // It uses the config provided to it for the duration of the tests.
 func NewFramework(baseName string, cfg *config.Config) *Framework {
+	scheme := runtime.NewScheme()
+	kscheme.AddToScheme(scheme)
+	certmgrscheme.AddToScheme(scheme)
+	apiext.AddToScheme(scheme)
+	apireg.AddToScheme(scheme)
+
 	f := &Framework{
 		Config:   cfg,
 		BaseName: baseName,
+		Scheme:   scheme,
 	}
 
 	f.helper = helper.NewHelper(cfg)
@@ -121,6 +120,10 @@ func (f *Framework) BeforeEach() {
 	By("Creating a kubernetes client")
 	kubeConfig, err := util.LoadConfig(f.Config.KubeConfig, f.Config.KubeContext)
 	Expect(err).NotTo(HaveOccurred())
+
+	kubeConfig.Burst = 9000
+	kubeConfig.QPS = 9000
+
 	f.KubeClientConfig = kubeConfig
 
 	f.KubeClientSet, err = kubernetes.NewForConfig(kubeConfig)
@@ -135,11 +138,11 @@ func (f *Framework) BeforeEach() {
 	Expect(err).NotTo(HaveOccurred())
 
 	By("Creating a controller-runtime client")
-	f.CRClient, err = crclient.New(kubeConfig, crclient.Options{Scheme: Scheme})
+	f.CRClient, err = crclient.New(kubeConfig, crclient.Options{Scheme: f.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 
 	By("Creating a gateway-api client")
-	f.GWClientSet, err = gwapi.NewForConfig(kubeConfig)
+	f.GWClientSet, err = gwapiclient.NewForConfig(kubeConfig)
 	Expect(err).NotTo(HaveOccurred())
 
 	By("Building a namespace api object")
@@ -179,7 +182,7 @@ func (f *Framework) AfterEach() {
 }
 
 func (f *Framework) printAddonLogs() {
-	if CurrentGinkgoTestDescription().Failed {
+	if CurrentSpecReport().Failed() {
 		for _, a := range f.requiredAddons {
 			if a, ok := a.(loggableAddon); ok {
 				l, err := a.Logs()
@@ -203,7 +206,7 @@ func (f *Framework) printAddonLogs() {
 func (f *Framework) RequireGlobalAddon(a addon.Addon) {
 	BeforeEach(func() {
 		By("Setting up access for global shared addon")
-		err := a.Setup(f.Config)
+		_, err := a.Setup(f.Config)
 		Expect(err).NotTo(HaveOccurred())
 	})
 }
@@ -219,7 +222,7 @@ func (f *Framework) RequireAddon(a addon.Addon) {
 
 	BeforeEach(func() {
 		By("Provisioning test-scoped addon")
-		err := a.Setup(f.Config)
+		_, err := a.Setup(f.Config)
 		if errors.IsSkip(err) {
 			Skipf("Skipping test as addon could not be setup: %v", err)
 		}

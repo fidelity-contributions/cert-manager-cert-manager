@@ -51,6 +51,9 @@ var (
 	defaultScheme = runtime.NewScheme()
 
 	ErrNotListening = errors.New("Server is not listening yet")
+
+	// based on https://github.com/kubernetes/kubernetes/blob/c28c2009181fcc44c5f6b47e10e62dacf53e4da0/staging/src/k8s.io/pod-security-admission/cmd/webhook/server/server.go
+	maxRequestSize = int64(3 * 1024 * 1024)
 )
 
 func init() {
@@ -273,6 +276,8 @@ func (s *Server) validate(ctx context.Context, obj runtime.Object) (runtime.Obje
 		return nil, errors.New("request is not of type apiextensions v1")
 	}
 	review.Response = s.ValidationWebhook.Validate(ctx, review.Request)
+	s.logAdmissionReview(review, "request received by validating webhook")
+
 	return review, nil
 }
 
@@ -282,7 +287,20 @@ func (s *Server) mutate(ctx context.Context, obj runtime.Object) (runtime.Object
 		return nil, errors.New("request is not of type apiextensions v1")
 	}
 	review.Response = s.MutationWebhook.Mutate(ctx, review.Request)
+	s.logAdmissionReview(review, "request received by mutating webhook")
+
 	return review, nil
+}
+
+func (s *Server) logAdmissionReview(review *admissionv1.AdmissionReview, prefix string) {
+	logLevel := logf.DebugLevel
+	if review.Request == nil {
+		s.log.V(logLevel).Info(prefix, "unexpected nil request")
+	} else if review.Response == nil {
+		s.log.V(logLevel).Info(prefix, "kind", review.Request.Kind.Kind, "name", review.Request.Name, "namespace", review.Request.Namespace, "unexpected empty response")
+	} else {
+		s.log.V(logLevel).Info(prefix, "kind", review.Request.Kind.Kind, "name", review.Request.Name, "namespace", review.Request.Namespace, "response uuid", review.Response.UID, "allowed", review.Response.Allowed)
+	}
 }
 
 func (s *Server) convert(_ context.Context, obj runtime.Object) (runtime.Object, error) {
@@ -292,6 +310,7 @@ func (s *Server) convert(_ context.Context, obj runtime.Object) (runtime.Object,
 			return nil, errors.New("review.request was nil")
 		}
 		review.Response = s.ConversionWebhook.Convert(review.Request)
+		s.log.V(logf.DebugLevel).Info("request received by converting webhook", "kind", review.Kind, "request uid", review.Request.UID, "response uid", review.Response.UID)
 		return review, nil
 	default:
 		return nil, fmt.Errorf("unsupported conversion review type: %T", review)
@@ -300,12 +319,30 @@ func (s *Server) convert(_ context.Context, obj runtime.Object) (runtime.Object,
 
 func (s *Server) handle(inner handleFunc) func(w http.ResponseWriter, req *http.Request) {
 	return func(w http.ResponseWriter, req *http.Request) {
-		defer req.Body.Close()
+		defer runtimeutil.HandleCrash(func(_ interface{}) {
+			// Assume the crash happened before the response was written.
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		})
 
-		data, err := io.ReadAll(req.Body)
+		if req.Body == nil || req.Body == http.NoBody {
+			err := errors.New("request body is empty")
+			s.log.Error(err, "bad request")
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		defer req.Body.Close()
+		limitedReader := &io.LimitedReader{R: req.Body, N: maxRequestSize}
+		data, err := io.ReadAll(limitedReader)
 		if err != nil {
-			s.log.Error(err, "failed to read request body")
-			w.WriteHeader(http.StatusBadRequest)
+			s.log.Error(err, "unable to read the body from the incoming request")
+			http.Error(w, "unable to read the body from the incoming request", http.StatusBadRequest)
+			return
+		}
+		if limitedReader.N <= 0 {
+			err := fmt.Errorf("request entity is too large; limit is %d bytes", maxRequestSize)
+			s.log.Error(err, "unable to read the body from the incoming request; limit reached")
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 			return
 		}
 

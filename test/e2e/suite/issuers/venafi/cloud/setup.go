@@ -19,15 +19,15 @@ package cloud
 import (
 	"context"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	vaddon "github.com/cert-manager/cert-manager/e2e-tests/framework/addon/venafi"
+	"github.com/cert-manager/cert-manager/e2e-tests/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	vaddon "github.com/cert-manager/cert-manager/test/e2e/framework/addon/venafi"
-	"github.com/cert-manager/cert-manager/test/e2e/util"
 )
 
 func CloudDescribe(name string, body func()) bool {

@@ -26,8 +26,8 @@ import (
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/rfc2136"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
-	"github.com/cert-manager/cert-manager/test/acme/dns"
-	testserver "github.com/cert-manager/cert-manager/test/acme/dns/server"
+	dns "github.com/cert-manager/cert-manager/test/acme"
+	testserver "github.com/cert-manager/cert-manager/test/acme/server"
 )
 
 func TestRunSuiteWithTSIG(t *testing.T) {
@@ -59,7 +59,7 @@ func TestRunSuiteWithTSIG(t *testing.T) {
 		TSIGKeyName: rfc2136TestTsigKeyName,
 	}
 
-	fixture := dns.NewFixture(&rfc2136.Solver{},
+	fixture := dns.NewFixture(rfc2136.New(rfc2136.InitializeResetLister()),
 		dns.SetResolvedZone(rfc2136TestZone),
 		dns.SetResolvedFQDN(rfc2136TestFqdn),
 		dns.SetAllowAmbientCredentials(false),
@@ -91,7 +91,7 @@ func TestRunSuiteNoTSIG(t *testing.T) {
 		Nameserver: server.ListenAddr(),
 	}
 
-	fixture := dns.NewFixture(&rfc2136.Solver{},
+	fixture := dns.NewFixture(rfc2136.New(rfc2136.InitializeResetLister()),
 		dns.SetResolvedZone(rfc2136TestZone),
 		dns.SetResolvedFQDN(rfc2136TestFqdn),
 		dns.SetAllowAmbientCredentials(false),

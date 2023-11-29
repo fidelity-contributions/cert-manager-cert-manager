@@ -38,15 +38,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
-	gwapiv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gwapiv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/certmanager/v1"
 	"github.com/cert-manager/cert-manager/pkg/util"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 func CertificateOnlyValidForDomains(cert *x509.Certificate, commonName string, dnsNames ...string) bool {
@@ -57,14 +57,13 @@ func CertificateOnlyValidForDomains(cert *x509.Certificate, commonName string, d
 }
 
 func WaitForIssuerStatusFunc(client clientset.IssuerInterface, name string, fn func(*v1.Issuer) (bool, error)) error {
-	return wait.PollImmediate(500*time.Millisecond, time.Minute,
-		func() (bool, error) {
-			issuer, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if err != nil {
-				return false, fmt.Errorf("error getting Issuer %q: %v", name, err)
-			}
-			return fn(issuer)
-		})
+	return wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
+		issuer, err := client.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("error getting Issuer %q: %v", name, err)
+		}
+		return fn(issuer)
+	})
 }
 
 // WaitForIssuerCondition waits for the status of the named issuer to contain
@@ -72,17 +71,15 @@ func WaitForIssuerStatusFunc(client clientset.IssuerInterface, name string, fn f
 func WaitForIssuerCondition(client clientset.IssuerInterface, name string, condition v1.IssuerCondition) error {
 	logf, done := log.LogBackoff()
 	defer done()
-	pollErr := wait.PollImmediate(500*time.Millisecond, time.Minute,
-		func() (bool, error) {
-			logf("Waiting for issuer %v condition %#v", name, condition)
-			issuer, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if nil != err {
-				return false, fmt.Errorf("error getting Issuer %q: %v", name, err)
-			}
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
+		logf("Waiting for issuer %v condition %#v", name, condition)
+		issuer, err := client.Get(ctx, name, metav1.GetOptions{})
+		if nil != err {
+			return false, fmt.Errorf("error getting Issuer %q: %v", name, err)
+		}
 
-			return apiutil.IssuerHasCondition(issuer, condition), nil
-		},
-	)
+		return apiutil.IssuerHasCondition(issuer, condition), nil
+	})
 	return wrapErrorWithIssuerStatusCondition(client, pollErr, name, condition.Type)
 }
 
@@ -112,17 +109,15 @@ func wrapErrorWithIssuerStatusCondition(client clientset.IssuerInterface, pollEr
 func WaitForClusterIssuerCondition(client clientset.ClusterIssuerInterface, name string, condition v1.IssuerCondition) error {
 	logf, done := log.LogBackoff()
 	defer done()
-	pollErr := wait.PollImmediate(500*time.Millisecond, time.Minute,
-		func() (bool, error) {
-			logf("Waiting for clusterissuer %v condition %#v", name, condition)
-			issuer, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if nil != err {
-				return false, fmt.Errorf("error getting ClusterIssuer %v: %v", name, err)
-			}
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
+		logf("Waiting for clusterissuer %v condition %#v", name, condition)
+		issuer, err := client.Get(ctx, name, metav1.GetOptions{})
+		if nil != err {
+			return false, fmt.Errorf("error getting ClusterIssuer %v: %v", name, err)
+		}
 
-			return apiutil.IssuerHasCondition(issuer, condition), nil
-		},
-	)
+		return apiutil.IssuerHasCondition(issuer, condition), nil
+	})
 	return wrapErrorWithClusterIssuerStatusCondition(client, pollErr, name, condition.Type)
 }
 
@@ -152,21 +147,19 @@ func wrapErrorWithClusterIssuerStatusCondition(client clientset.ClusterIssuerInt
 func WaitForCRDToNotExist(client apiextensionsv1.CustomResourceDefinitionInterface, name string) error {
 	logf, done := log.LogBackoff()
 	defer done()
-	return wait.PollImmediate(500*time.Millisecond, time.Minute,
-		func() (bool, error) {
-			logf("Waiting for CRD %v to not exist", name)
-			_, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if nil == err {
-				return false, nil
-			}
-
-			if errors.IsNotFound(err) {
-				return true, nil
-			}
-
+	return wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
+		logf("Waiting for CRD %v to not exist", name)
+		_, err := client.Get(ctx, name, metav1.GetOptions{})
+		if nil == err {
 			return false, nil
-		},
-	)
+		}
+
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+
+		return false, nil
+	})
 }
 
 // Deprecated: use test/unit/gen/Certificate in future
@@ -242,7 +235,7 @@ func NewCertManagerBasicCertificateRequest(name, issuerName string, issuerKind s
 	}
 
 	csr := &x509.CertificateRequest{
-		Version:            3,
+		Version:            0,
 		SignatureAlgorithm: signatureAlgorithm,
 		PublicKeyAlgorithm: keyAlgorithm,
 		PublicKey:          sk.Public(),
@@ -380,19 +373,19 @@ func pathTypePrefix() *networkingv1.PathType {
 // watching the 'foo' gateway class, so this Gateway will not be used to
 // actually route traffic, but can be used to test cert-manager controllers that
 // sync Gateways, such as gateway-shim.
-func NewGateway(gatewayName, ns, secretName string, annotations map[string]string, dnsNames ...string) *gwapiv1alpha2.Gateway {
+func NewGateway(gatewayName, ns, secretName string, annotations map[string]string, dnsNames ...string) *gwapiv1beta1.Gateway {
 
-	return &gwapiv1alpha2.Gateway{
+	return &gwapiv1beta1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        gatewayName,
 			Annotations: annotations,
 		},
-		Spec: gwapiv1alpha2.GatewaySpec{
+		Spec: gwapiv1beta1.GatewaySpec{
 			GatewayClassName: "foo",
-			Listeners: []gwapiv1alpha2.Listener{{
-				AllowedRoutes: &gwapiv1alpha2.AllowedRoutes{
-					Namespaces: &gwapiv1alpha2.RouteNamespaces{
-						From: func() *gwapiv1alpha2.FromNamespaces { f := gwapiv1alpha2.NamespacesFromSame; return &f }(),
+			Listeners: []gwapiv1beta1.Listener{{
+				AllowedRoutes: &gwapiv1beta1.AllowedRoutes{
+					Namespaces: &gwapiv1beta1.RouteNamespaces{
+						From: func() *gwapiv1beta1.FromNamespaces { f := gwapiv1beta1.NamespacesFromSame; return &f }(),
 						Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
 							"gw": gatewayName,
 						}},
@@ -400,16 +393,16 @@ func NewGateway(gatewayName, ns, secretName string, annotations map[string]strin
 					Kinds: nil,
 				},
 				Name:     "acme-solver",
-				Protocol: gwapiv1alpha2.TCPProtocolType,
-				Port:     gwapiv1alpha2.PortNumber(80),
-				Hostname: (*gwapiv1alpha2.Hostname)(&dnsNames[0]),
-				TLS: &gwapiv1alpha2.GatewayTLSConfig{
-					CertificateRefs: []*gwapiv1alpha2.SecretObjectReference{
+				Protocol: gwapiv1beta1.TLSProtocolType,
+				Port:     gwapiv1beta1.PortNumber(443),
+				Hostname: (*gwapiv1beta1.Hostname)(&dnsNames[0]),
+				TLS: &gwapiv1beta1.GatewayTLSConfig{
+					CertificateRefs: []gwapiv1beta1.SecretObjectReference{
 						{
-							Kind:      func() *gwapiv1alpha2.Kind { k := gwapiv1alpha2.Kind("Secret"); return &k }(),
-							Name:      gwapiv1alpha2.ObjectName(secretName),
-							Group:     func() *gwapiv1alpha2.Group { g := gwapiv1alpha2.Group(corev1.GroupName); return &g }(),
-							Namespace: (*gwapiv1alpha2.Namespace)(&ns),
+							Kind:      func() *gwapiv1beta1.Kind { k := gwapiv1beta1.Kind("Secret"); return &k }(),
+							Name:      gwapiv1beta1.ObjectName(secretName),
+							Group:     func() *gwapiv1beta1.Group { g := gwapiv1beta1.Group(corev1.GroupName); return &g }(),
+							Namespace: (*gwapiv1beta1.Namespace)(&ns),
 						},
 					},
 				},

@@ -19,7 +19,6 @@ package framework
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,17 +33,17 @@ import (
 	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/runtime/serializer/versioning"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	webhooktesting "github.com/cert-manager/cert-manager/cmd/webhook/app/testing"
 	"github.com/cert-manager/cert-manager/internal/test/paths"
 	"github.com/cert-manager/cert-manager/internal/webhook"
-	"github.com/cert-manager/cert-manager/pkg/api"
 	"github.com/cert-manager/cert-manager/pkg/webhook/handlers"
-	"github.com/cert-manager/cert-manager/test/internal/apiserver"
+	"github.com/cert-manager/cert-manager/test/apiserver"
+	webhooktesting "github.com/cert-manager/cert-manager/test/webhook"
 )
 
 type StopFunc func()
@@ -62,7 +61,7 @@ type RunControlPlaneOption func(*controlPlaneOptions)
 // server in tests.
 func WithCRDDirectory(directory string) RunControlPlaneOption {
 	return func(o *controlPlaneOptions) {
-		o.crdsDir = pointer.StringPtr(directory)
+		o.crdsDir = ptr.To(directory)
 	}
 }
 
@@ -81,7 +80,7 @@ func RunControlPlane(t *testing.T, ctx context.Context, optionFunctions ...RunCo
 	}
 
 	options := &controlPlaneOptions{
-		crdsDir: pointer.StringPtr(crdDirectoryPath),
+		crdsDir: ptr.To(crdDirectoryPath),
 	}
 
 	for _, f := range optionFunctions {
@@ -99,7 +98,7 @@ func RunControlPlane(t *testing.T, ctx context.Context, optionFunctions ...RunCo
 		t.Fatal(err)
 	}
 
-	f, err := ioutil.TempFile("", "integration-")
+	f, err := os.CreateTemp("", "integration-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +127,7 @@ func RunControlPlane(t *testing.T, ctx context.Context, optionFunctions ...RunCo
 		t.Fatal(err)
 	}
 
-	cl, err := client.New(env.Config, client.Options{Scheme: api.Scheme})
+	cl, err := client.New(env.Config, client.Options{Scheme: kscheme.Scheme})
 	if err != nil {
 		t.Fatal(err)
 	}

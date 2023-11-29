@@ -25,7 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -202,10 +202,15 @@ func Test_ensureSecretData(t *testing.T) {
 						FieldsV1: &metav1.FieldsV1{
 							Raw: []byte(`{"f:metadata": {
 							"f:annotations": {
+								"f:cert-manager.io/common-name": {},
+								"f:cert-manager.io/alt-names": {},
+								"f:cert-manager.io/ip-sans": {},
+								"f:cert-manager.io/uri-sans": {},
 								"f:foo": {},
 								"f:another-annotation": {}
 							},
 							"f:labels": {
+								"f:controller.cert-manager.io/fao": {},
 								"f:abc": {},
 								"f:another-label": {}
 							}
@@ -241,9 +246,14 @@ func Test_ensureSecretData(t *testing.T) {
 						FieldsV1: &metav1.FieldsV1{
 							Raw: []byte(`{"f:metadata": {
 							"f:annotations": {
+								"f:cert-manager.io/common-name": {},
+								"f:cert-manager.io/alt-names": {},
+								"f:cert-manager.io/ip-sans": {},
+								"f:cert-manager.io/uri-sans": {},
 								"f:foo": {}
 							},
 							"f:labels": {
+								"f:controller.cert-manager.io/fao": {},
 								"f:abc": {}
 							}
 						}}`),
@@ -257,13 +267,14 @@ func Test_ensureSecretData(t *testing.T) {
 			},
 			expectedAction: true,
 		},
-		"if Certificate exists in a false Issuing condition, Secret exists and matches the SecretTemplate with the correct managed fields, should do nothing": {
+		"if Certificate exists in a false Issuing condition, Secret exists and matches the SecretTemplate with the correct managed fields and base labels, should do nothing": {
 			key: "test-namespace/test-name",
 			cert: &cmapi.Certificate{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name"},
 				Spec: cmapi.CertificateSpec{
-					SecretName:     "test-secret",
-					SecretTemplate: &cmapi.CertificateSecretTemplate{Annotations: map[string]string{"foo": "bar"}, Labels: map[string]string{"abc": "123"}},
+					SecretName: "test-secret",
+					SecretTemplate: &cmapi.CertificateSecretTemplate{Annotations: map[string]string{"foo": "bar"},
+						Labels: map[string]string{"abc": "123"}},
 				},
 				Status: cmapi.CertificateStatus{
 					Conditions: []cmapi.CertificateCondition{{Type: cmapi.CertificateConditionIssuing, Status: cmmeta.ConditionFalse}},
@@ -272,15 +283,21 @@ func Test_ensureSecretData(t *testing.T) {
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test-namespace", Name: "test-secret",
-					Annotations: map[string]string{"foo": "bar"}, Labels: map[string]string{"abc": "123"},
+					Annotations: map[string]string{"foo": "bar"},
+					Labels:      map[string]string{"abc": "123", cmapi.PartOfCertManagerControllerLabelKey: "true"},
 					ManagedFields: []metav1.ManagedFieldsEntry{{
 						Manager: fieldManager,
 						FieldsV1: &metav1.FieldsV1{
 							Raw: []byte(`{"f:metadata": {
 							"f:annotations": {
+								"f:cert-manager.io/common-name": {},
+								"f:cert-manager.io/alt-names": {},
+								"f:cert-manager.io/ip-sans": {},
+								"f:cert-manager.io/uri-sans": {},
 								"f:foo": {}
 							},
 							"f:labels": {
+								"f:controller.cert-manager.io/fao": {},
 								"f:abc": {}
 							}
 						}}`),
@@ -295,6 +312,56 @@ func Test_ensureSecretData(t *testing.T) {
 			expectedAction: false,
 		},
 		"if Certificate exists in a false Issuing condition, Secret exists but does not match SecretTemplate, should apply the Labels and Annotations": {
+			key: "test-namespace/test-name",
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name"},
+				Spec: cmapi.CertificateSpec{
+					SecretName:     "test-secret",
+					SecretTemplate: &cmapi.CertificateSecretTemplate{Annotations: map[string]string{"foo": "bar"}, Labels: map[string]string{"abc": "123"}},
+				},
+				Status: cmapi.CertificateStatus{
+					Conditions: []cmapi.CertificateCondition{
+						{Type: cmapi.CertificateConditionIssuing, Status: cmmeta.ConditionFalse},
+						{Type: cmapi.CertificateConditionIssuing, Status: cmmeta.ConditionFalse},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"}},
+				Data: map[string][]byte{
+					"tls.crt": cert,
+					"tls.key": pk,
+				},
+			},
+			expectedAction: true,
+		},
+		"if Certificate exists in a false Issuing condition, Secret exists but is missing the required label, apply the label": {
+			key: "test-namespace/test-name",
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name"},
+				Spec: cmapi.CertificateSpec{
+					SecretName:     "test-secret",
+					SecretTemplate: &cmapi.CertificateSecretTemplate{Annotations: map[string]string{"foo": "bar"}, Labels: map[string]string{"abc": "123"}},
+				},
+				Status: cmapi.CertificateStatus{
+					Conditions: []cmapi.CertificateCondition{
+						{Type: cmapi.CertificateConditionIssuing, Status: cmmeta.ConditionFalse},
+						{Type: cmapi.CertificateConditionIssuing, Status: cmmeta.ConditionFalse},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{"foo": "bar"}},
+				Data: map[string][]byte{
+					"tls.crt": cert,
+					"tls.key": pk,
+				},
+			},
+			expectedAction: true,
+		},
+		"if Certificate exists in a false Issuing condition, Secret exists with some labels, but is missing the required label, apply the label": {
 			key: "test-namespace/test-name",
 			cert: &cmapi.Certificate{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name"},
@@ -330,7 +397,8 @@ func Test_ensureSecretData(t *testing.T) {
 				},
 			},
 			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"}},
 				Data: map[string][]byte{
 					"tls.crt": cert,
 					"tls.key": pk,
@@ -350,7 +418,8 @@ func Test_ensureSecretData(t *testing.T) {
 				},
 			},
 			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"}},
 				Data: map[string][]byte{
 					"tls.crt": cert,
 					"tls.key": pk,
@@ -371,7 +440,8 @@ func Test_ensureSecretData(t *testing.T) {
 				},
 			},
 			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"}},
 				Data: map[string][]byte{
 					"tls.crt": cert,
 					"tls.key": pk,
@@ -393,13 +463,31 @@ func Test_ensureSecretData(t *testing.T) {
 			},
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
 					ManagedFields: []metav1.ManagedFieldsEntry{{
 						Manager: fieldManager,
 						FieldsV1: &metav1.FieldsV1{
-							Raw: []byte(`{"f:data": {
-							"f:tls-combined.pem": {},
-							"f:key.der": {}
-						}}`),
+							Raw: []byte(`
+							{
+								"f:metadata": {
+									"f:labels": {
+										"f:controller.cert-manager.io/fao": {}
+									},
+									"f:annotations": {
+										"f:cert-manager.io/common-name": {},
+										"f:cert-manager.io/alt-names": {},
+										"f:cert-manager.io/ip-sans": {},
+										"f:cert-manager.io/uri-sans": {}
+									},
+									"f:ownerReferences": {
+										"k:{\"uid\":\"uid-123\"}": {}
+									}
+								},
+								"f:data": {
+									"f:tls-combined.pem": {},
+									"f:key.der": {}
+								}
+							}`),
 						},
 					}},
 				},
@@ -423,13 +511,31 @@ func Test_ensureSecretData(t *testing.T) {
 			},
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
 					ManagedFields: []metav1.ManagedFieldsEntry{{
 						Manager: fieldManager,
 						FieldsV1: &metav1.FieldsV1{
-							Raw: []byte(`{"f:data": {
-							"f:tls-combined.pem": {},
-							"f:key.der": {}
-						}}`),
+							Raw: []byte(`
+							{
+								"f:metadata": {
+									"f:labels": {
+										"f:controller.cert-manager.io/fao": {}
+									},
+									"f:annotations": {
+										"f:cert-manager.io/common-name": {},
+										"f:cert-manager.io/alt-names": {},
+										"f:cert-manager.io/ip-sans": {},
+										"f:cert-manager.io/uri-sans": {}
+									},
+									"f:ownerReferences": {
+										"k:{\"uid\":\"uid-123\"}": {}
+									}
+								},
+								"f:data": {
+									"f:tls-combined.pem": {},
+									"f:key.der": {}
+								}
+							}`),
 						},
 					}},
 				},
@@ -452,13 +558,24 @@ func Test_ensureSecretData(t *testing.T) {
 			},
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
 					ManagedFields: []metav1.ManagedFieldsEntry{
 						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
 							Raw: []byte(`
-                {"f:metadata": {
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
 								"f:ownerReferences": {
-                "k:{\"uid\":\"uid-123\"}": {}
-							}}}`),
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
 						}},
 					},
 				},
@@ -475,20 +592,558 @@ func Test_ensureSecretData(t *testing.T) {
 			},
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-secret",
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
 					OwnerReferences: []metav1.OwnerReference{
-						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: pointer.Bool(true), BlockOwnerDeletion: pointer.Bool(true)},
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
 					},
 					ManagedFields: []metav1.ManagedFieldsEntry{
 						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
 							Raw: []byte(`
-                {"f:metadata": {
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
 								"f:ownerReferences": {
-                "k:{\"uid\":\"uid-123\"}": {}
-							}}}`),
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
 						}},
 					},
 				},
 				Data: map[string][]byte{"tls.crt": cert, "tls.key": pk, "key.der": pkDER},
+			},
+			expectedAction: false,
+		},
+		"refresh secrets when keystore is not defined and the secret has keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-234")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "test-secret",
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-secret", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-234"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+					cmapi.PKCS12TruststoreKey: []byte("SomeData"),
+				},
+			},
+			expectedAction: true,
+		},
+		"refresh secrets when JKS keystore is defined and the secret does not have keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						JKS: &cmapi.JKSKeystore{
+							Create: true,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+				},
+			},
+			expectedAction: true,
+		},
+		"refresh secrets when JKS keystore is defined, create is disabled and the secret has keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						JKS: &cmapi.JKSKeystore{
+							Create: false,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+					cmapi.JKSTruststoreKey: []byte("SomeData"),
+				},
+			},
+			expectedAction: true,
+		},
+		"refresh secrets when JKS keystore is null and the secret has keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						JKS: nil,
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+					cmapi.JKSTruststoreKey: []byte("SomeData"),
+				},
+			},
+			expectedAction: true,
+		},
+		"do nothing when JKS keystore is defined and create field is set to false": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						JKS: &cmapi.JKSKeystore{
+							Create: false,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+				},
+			},
+			expectedAction: false,
+		},
+		"refresh secret when PKCS12 keystore is defined and the secret does not have keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						PKCS12: &cmapi.PKCS12Keystore{
+							Create: true,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+				},
+			},
+			expectedAction: true,
+		},
+		"refresh secret when PKCS12 keystore is defined, create is disabled and the secret has keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						PKCS12: &cmapi.PKCS12Keystore{
+							Create: false,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+					cmapi.PKCS12TruststoreKey: []byte("SomeData"),
+				},
+			},
+			expectedAction: true,
+		},
+		"refresh secret when PKCS12 keystore is null and the secret has keystore/truststore fields": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						PKCS12: nil,
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+					cmapi.PKCS12TruststoreKey: []byte("SomeData"),
+				},
+			},
+			expectedAction: true,
+		},
+		"do nothing when PKCS12 keystore is defined and the create is set to false": {
+			key:            "test-namespace/test-name",
+			enableOwnerRef: true,
+			cert: &cmapi.Certificate{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-name", UID: types.UID("uid-123")},
+				Spec: cmapi.CertificateSpec{
+					CommonName: "example.com",
+					IssuerRef: cmmeta.ObjectReference{
+						Name:  "testissuer",
+						Kind:  "IssuerKind",
+						Group: "group.example.com",
+					},
+					SecretName: "something",
+					Keystores: &cmapi.CertificateKeystores{
+						PKCS12: &cmapi.PKCS12Keystore{
+							Create: false,
+						},
+					},
+				}},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "something", Namespace: "test-namespace",
+					Annotations: map[string]string{
+						cmapi.IssuerNameAnnotationKey:  "testissuer",
+						cmapi.IssuerKindAnnotationKey:  "IssuerKind",
+						cmapi.IssuerGroupAnnotationKey: "group.example.com",
+					},
+					Labels: map[string]string{cmapi.PartOfCertManagerControllerLabelKey: "true"},
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "cert-manager.io/v1", Kind: "Certificate", Name: "test-name", UID: types.UID("uid-123"), Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)},
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: fieldManager, FieldsV1: &metav1.FieldsV1{
+							Raw: []byte(`
+							{"f:metadata": {
+								"f:labels": {
+									"f:controller.cert-manager.io/fao": {}
+								},
+								"f:annotations": {
+									"f:cert-manager.io/common-name": {},
+									"f:cert-manager.io/alt-names": {},
+									"f:cert-manager.io/ip-sans": {},
+									"f:cert-manager.io/uri-sans": {}
+								},
+								"f:ownerReferences": {
+									"k:{\"uid\":\"uid-123\"}": {}
+								}
+							}}`),
+						}},
+					},
+				},
+				Data: map[string][]byte{
+					corev1.TLSPrivateKeyKey: pk,
+					corev1.TLSCertKey: testcrypto.MustCreateCert(t, pk,
+						&cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.com"}},
+					),
+				},
 			},
 			expectedAction: false,
 		},

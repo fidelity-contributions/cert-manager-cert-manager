@@ -18,7 +18,6 @@ package vault
 
 import (
 	"context"
-	"fmt"
 
 	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
@@ -33,16 +32,18 @@ const (
 
 	errorVault = "VaultError"
 
-	messageVaultClientInitFailed         = "Failed to initialize Vault client: "
-	messageVaultStatusVerificationFailed = "Vault is not initialized or is sealed"
-	messageVaultConfigRequired           = "Vault config cannot be empty"
-	messageServerAndPathRequired         = "Vault server and path are required fields"
-	messageAuthFieldsRequired            = "Vault tokenSecretRef, appRole, or kubernetes is required"
-	messageMultipleAuthFieldsSet         = "Multiple auth methods cannot be set on the same Vault issuer"
+	messageVaultClientInitFailed = "Failed to initialize Vault client: "
+	messageVaultConfigRequired   = "Vault config cannot be empty"
+	messageServerAndPathRequired = "Vault server and path are required fields"
+	messageAuthFieldsRequired    = "Vault tokenSecretRef, appRole, or kubernetes is required"
+	messageMultipleAuthFieldsSet = "Multiple auth methods cannot be set on the same Vault issuer"
 
-	messageKubeAuthFieldsRequired    = "Vault Kubernetes auth requires both role and secretRef.name"
+	messageKubeAuthRoleRequired      = "Vault Kubernetes auth requires a role to be set"
+	messageKubeAuthEitherRequired    = "Vault Kubernetes auth requires either secretRef.name or serviceAccountRef.name to be set"
+	messageKubeAuthSingleRequired    = "Vault Kubernetes auth cannot be used with both secretRef.name and serviceAccountRef.name"
 	messageTokenAuthNameRequired     = "Vault Token auth requires tokenSecretRef.name"
 	messageAppRoleAuthFieldsRequired = "Vault AppRole auth requires both roleId and tokenSecretRef.name"
+	messageAppRoleAuthKeyRequired    = "Vault AppRole auth requires secretRef.key"
 )
 
 // Setup creates a new Vault client and attempts to authenticate with the Vault instance and sets the issuer's conditions to reflect the success of the setup.
@@ -94,15 +95,36 @@ func (v *Vault) Setup(ctx context.Context) error {
 		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageAppRoleAuthFieldsRequired)
 		return nil
 	}
-
-	// check if all mandatory Vault Kubernetes fields are set.
-	if kubeAuth != nil && (len(kubeAuth.SecretRef.Name) == 0 || len(kubeAuth.Role) == 0) {
-		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageKubeAuthFieldsRequired)
-		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageKubeAuthFieldsRequired)
+	if appRoleAuth != nil && len(appRoleAuth.SecretRef.Key) == 0 {
+		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageAppRoleAuthKeyRequired)
+		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageAppRoleAuthKeyRequired)
 		return nil
 	}
 
-	client, err := vaultinternal.New(v.resourceNamespace, v.secretsLister, v.issuer)
+	// When using the Kubernetes auth, giving a role is mandatory.
+	if kubeAuth != nil && len(kubeAuth.Role) == 0 {
+		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageKubeAuthRoleRequired)
+		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageKubeAuthRoleRequired)
+		return nil
+	}
+
+	// When using the Kubernetes auth, you must either set secretRef or
+	// serviceAccountRef.
+	if kubeAuth != nil && (kubeAuth.SecretRef.Name == "" && kubeAuth.ServiceAccountRef == nil) {
+		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageKubeAuthEitherRequired)
+		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageKubeAuthEitherRequired)
+		return nil
+	}
+
+	// When using the Kubernetes auth, you can't use secretRef and
+	// serviceAccountRef simultaneously.
+	if kubeAuth != nil && (kubeAuth.SecretRef.Name != "" && kubeAuth.ServiceAccountRef != nil) {
+		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageKubeAuthSingleRequired)
+		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageKubeAuthSingleRequired)
+		return nil
+	}
+
+	client, err := vaultinternal.New(v.resourceNamespace, v.createTokenFn, v.secretsLister, v.issuer)
 	if err != nil {
 		s := messageVaultClientInitFailed + err.Error()
 		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, s)
@@ -111,9 +133,9 @@ func (v *Vault) Setup(ctx context.Context) error {
 	}
 
 	if err := client.IsVaultInitializedAndUnsealed(); err != nil {
-		logf.V(logf.WarnLevel).Infof("%s: %s: error: %s", v.issuer.GetObjectMeta().Name, messageVaultStatusVerificationFailed, err.Error())
-		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageVaultStatusVerificationFailed)
-		return fmt.Errorf(messageVaultStatusVerificationFailed)
+		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, err.Error())
+		apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, err.Error())
+		return err
 	}
 
 	logf.Log.V(logf.DebugLevel).Info(messageVaultVerified)

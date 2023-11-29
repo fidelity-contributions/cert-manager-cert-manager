@@ -24,6 +24,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	cmacme "github.com/cert-manager/cert-manager/internal/apis/acme"
@@ -105,10 +106,24 @@ func ValidateIssuerConfig(iss *certmanager.IssuerConfig, fldPath *field.Path) (f
 
 func ValidateACMEIssuerConfig(iss *cmacme.ACMEIssuer, fldPath *field.Path) (field.ErrorList, []string) {
 	var warnings []string
+
 	el := field.ErrorList{}
+
+	if len(iss.CABundle) > 0 && iss.SkipTLSVerify {
+		el = append(el, field.Invalid(fldPath.Child("caBundle"), "", "caBundle and skipTLSVerify are mutually exclusive and cannot both be set"))
+		el = append(el, field.Invalid(fldPath.Child("skipTLSVerify"), iss.SkipTLSVerify, "caBundle and skipTLSVerify are mutually exclusive and cannot both be set"))
+	}
+
+	if len(iss.CABundle) > 0 {
+		if err := validateCABundleNotEmpty(iss.CABundle); err != nil {
+			el = append(el, field.Invalid(fldPath.Child("caBundle"), "", err.Error()))
+		}
+	}
+
 	if len(iss.PrivateKey.Name) == 0 {
 		el = append(el, field.Required(fldPath.Child("privateKeySecretRef", "name"), "private key secret name is a required field"))
 	}
+
 	if len(iss.Server) == 0 {
 		el = append(el, field.Required(fldPath.Child("server"), "acme server URL is a required field"))
 	}
@@ -181,9 +196,21 @@ func ValidateACMEIssuerChallengeSolverHTTP01Config(http01 *cmacme.ACMEChallengeS
 func ValidateACMEIssuerChallengeSolverHTTP01IngressConfig(ingress *cmacme.ACMEChallengeSolverHTTP01Ingress, fldPath *field.Path) field.ErrorList {
 	el := field.ErrorList{}
 
-	if ingress.Class != nil && len(ingress.Name) > 0 {
-		el = append(el, field.Forbidden(fldPath, "only one of 'name' or 'class' should be specified"))
+	if ingress.Class != nil && ingress.IngressClassName != nil && len(ingress.Name) > 0 {
+		el = append(el, field.Forbidden(fldPath, "only one of 'ingressClassName', 'name' or 'class' should be specified"))
 	}
+
+	// Since "class" used to be a free string, let's have a stricter validation
+	// for "ingressClassName" since it is expected to be a valid resource name.
+	// A notable example is "azure/application-gateway" that is a valid value
+	// for "class" but not for "ingressClassName".
+	if ingress.IngressClassName != nil {
+		errs := validation.IsDNS1123Subdomain(*ingress.IngressClassName)
+		if len(errs) > 0 {
+			el = append(el, field.Invalid(fldPath.Child("ingressClassName"), *ingress.IngressClassName, "must be a valid IngressClass name: "+strings.Join(errs, ", ")))
+		}
+	}
+
 	switch ingress.ServiceType {
 	case "", corev1.ServiceTypeClusterIP, corev1.ServiceTypeNodePort:
 	default:
@@ -217,6 +244,11 @@ func ValidateCAIssuerConfig(iss *certmanager.CAIssuer, fldPath *field.Path) fiel
 			el = append(el, field.Invalid(fldPath.Child("ocspServer").Index(i), ocspURL, "must be a valid URL, e.g., http://ocsp.int-x3.letsencrypt.org"))
 		}
 	}
+	for i, issuerURL := range iss.IssuingCertificateURLs {
+		if issuerURL == "" {
+			el = append(el, field.Invalid(fldPath.Child("issuingCertificateURLs").Index(i), issuerURL, "must be a valid URL"))
+		}
+	}
 	return el
 }
 
@@ -226,31 +258,100 @@ func ValidateSelfSignedIssuerConfig(iss *certmanager.SelfSignedIssuer, fldPath *
 
 func ValidateVaultIssuerConfig(iss *certmanager.VaultIssuer, fldPath *field.Path) field.ErrorList {
 	el := field.ErrorList{}
+
 	if len(iss.Server) == 0 {
 		el = append(el, field.Required(fldPath.Child("server"), ""))
 	}
+
 	if len(iss.Path) == 0 {
 		el = append(el, field.Required(fldPath.Child("path"), ""))
 	}
 
-	// check if caBundle is valid
-	certs := iss.CABundle
-	if len(certs) > 0 {
-		caCertPool := x509.NewCertPool()
-		ok := caCertPool.AppendCertsFromPEM(certs)
-		if !ok {
-			el = append(el, field.Invalid(fldPath.Child("caBundle"), "", "Specified CA bundle is invalid"))
+	if len(iss.CABundle) > 0 {
+		if err := validateCABundleNotEmpty(iss.CABundle); err != nil {
+			el = append(el, field.Invalid(fldPath.Child("caBundle"), "<snip>", err.Error()))
 		}
 	}
 
+	if len(iss.CABundle) > 0 && iss.CABundleSecretRef != nil {
+		// We don't use iss.CABundle for the "value interface{}" argument to field.Invalid for caBundle
+		// since printing the whole bundle verbatim won't help diagnose any issues
+		el = append(el, field.Invalid(fldPath.Child("caBundle"), "<snip>", "specified caBundle and caBundleSecretRef cannot be used together"))
+		el = append(el, field.Invalid(fldPath.Child("caBundleSecretRef"), iss.CABundleSecretRef.Name, "specified caBundleSecretRef and caBundle cannot be used together"))
+	}
+
+	el = append(el, ValidateVaultIssuerAuth(&iss.Auth, fldPath.Child("auth"))...)
+
 	return el
-	// TODO: add validation for Vault authentication types
+}
+
+func ValidateVaultIssuerAuth(auth *certmanager.VaultAuth, fldPath *field.Path) field.ErrorList {
+	el := field.ErrorList{}
+
+	unionCount := 0
+	if auth.TokenSecretRef != nil {
+		unionCount++
+	}
+
+	if auth.AppRole != nil {
+		if auth.AppRole.RoleId == "" {
+			el = append(el, field.Required(fldPath.Child("appRole", "roleId"), ""))
+		}
+
+		if auth.AppRole.SecretRef.Name == "" {
+			el = append(el, field.Required(fldPath.Child("appRole", "secretRef", "name"), ""))
+		}
+		unionCount++
+	}
+
+	if auth.Kubernetes != nil {
+		unionCount++
+
+		if auth.Kubernetes.Role == "" {
+			el = append(el, field.Required(fldPath.Child("kubernetes", "role"), ""))
+		}
+
+		kubeCount := 0
+		if len(auth.Kubernetes.SecretRef.Name) > 0 {
+			kubeCount++
+		}
+
+		if auth.Kubernetes.ServiceAccountRef != nil {
+			kubeCount++
+			if len(auth.Kubernetes.ServiceAccountRef.Name) == 0 {
+				el = append(el, field.Required(fldPath.Child("kubernetes", "serviceAccountRef", "name"), ""))
+			}
+		}
+
+		if kubeCount == 0 {
+			el = append(el, field.Required(fldPath.Child("kubernetes"), "please supply one of: secretRef, serviceAccountRef"))
+		}
+		if kubeCount > 1 {
+			el = append(el, field.Forbidden(fldPath.Child("kubernetes"), "please supply one of: secretRef, serviceAccountRef"))
+		}
+	}
+
+	if unionCount == 0 {
+		el = append(el, field.Required(fldPath, "please supply one of: appRole, kubernetes, tokenSecretRef"))
+	}
+
+	// Due to the fact that there has not been any "oneOf" validation on
+	// tokenSecretRef, appRole, and kubernetes, people may already have created
+	// Issuer resources in which they have set two of these fields instead of
+	// one. To avoid breaking these manifests, we don't check that the user has
+	// set a single field among these three. Instead, we documented in the API
+	// that it is the first field that is set gets used.
+
+	return el
 }
 
 func ValidateVenafiTPP(tpp *certmanager.VenafiTPP, fldPath *field.Path) (el field.ErrorList) {
 	if tpp.URL == "" {
 		el = append(el, field.Required(fldPath.Child("url"), ""))
 	}
+
+	// TODO: validate CABundle using validateCABundleNotEmpty
+
 	return el
 }
 
@@ -404,10 +505,9 @@ func ValidateACMEChallengeSolverDNS01(p *cmacme.ACMEChallengeSolverDNS01, fldPat
 			if len(p.Route53.Region) == 0 {
 				el = append(el, field.Required(fldPath.Child("route53", "region"), ""))
 			}
-			// accessKeyID or accessKeyIDSecretRef must be specified, but not both
-			if len(p.Route53.AccessKeyID) == 0 && p.Route53.SecretAccessKeyID == nil {
-				el = append(el, field.Required(fldPath.Child("route53"), "accessKeyID or accessKeyIDSecretRef is required"))
-			}
+			// We don't include a validation here asserting that either the
+			// AccessKeyID or SecretAccessKeyID must be specified, because it is
+			// valid to use neither when using ambient credentials.
 			if len(p.Route53.AccessKeyID) > 0 && p.Route53.SecretAccessKeyID != nil {
 				el = append(el, field.Required(fldPath.Child("route53"), "accessKeyID and accessKeyIDSecretRef cannot both be specified"))
 			}
@@ -495,4 +595,23 @@ func ValidateSecretKeySelector(sks *cmmeta.SecretKeySelector, fldPath *field.Pat
 		el = append(el, field.Required(fldPath.Child("key"), "secret key is required"))
 	}
 	return el
+}
+
+// validateCABundleNotEmpty performs a soft check on the CA bundle to see if there's at least one
+// valid CA certificate inside.
+// This uses the standard library crypto/x509.CertPool.AppendCertsFromPEM function, which
+// skips over invalid certificates rather than rejecting them.
+func validateCABundleNotEmpty(bundle []byte) error {
+	// TODO: Change this function to actually validate certificates so that invalid certs
+	// are rejected or at least warned on.
+	// For example, something like: https://github.com/cert-manager/trust-manager/blob/21c839ff1128990e049eaf23000a9a8d6716c89e/pkg/util/pem.go#L26-L81
+
+	pool := x509.NewCertPool()
+
+	ok := pool.AppendCertsFromPEM(bundle)
+	if !ok {
+		return fmt.Errorf("cert bundle didn't contain any valid certificates")
+	}
+
+	return nil
 }

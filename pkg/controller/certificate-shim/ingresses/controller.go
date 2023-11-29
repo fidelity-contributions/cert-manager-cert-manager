@@ -45,7 +45,7 @@ type controller struct {
 func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitingInterface, []cache.InformerSynced, error) {
 	cmShared := ctx.SharedInformerFactory
 
-	ingressInformer := ctx.KubeSharedInformerFactory.Networking().V1().Ingresses()
+	ingressInformer := ctx.KubeSharedInformerFactory.Ingresses()
 	c.ingressLister = ingressInformer.Lister()
 
 	log := logf.FromContext(ctx.RootContext, ControllerName)
@@ -91,7 +91,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return nil
 	}
 
-	crt, err := c.ingressLister.Ingresses(namespace).Get(name)
+	ingress, err := c.ingressLister.Ingresses(namespace).Get(name)
 
 	if err != nil {
 		if k8sErrors.IsNotFound(err) {
@@ -102,7 +102,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return err
 	}
 
-	return c.sync(ctx, crt)
+	return c.sync(ctx, ingress)
 }
 
 // Whenever a Certificate gets updated, added or deleted, we want to reconcile
@@ -110,16 +110,16 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 // example, the following Certificate "cert-1" is controlled by the Ingress
 // "ingress-1":
 //
-//     kind: Certificate
-//     metadata:                                           Note that the owner
-//       namespace: cert-1                                 reference does not
-//       ownerReferences:                                  have a namespace,
-//       - controller: true                                since owner refs
-//         apiVersion: networking.k8s.io/v1beta1           only work inside
-//         kind: Ingress                                   the same namespace.
-//         name: ingress-1
-//         blockOwnerDeletion: true
-//         uid: 7d3897c2-ce27-4144-883a-e1b5f89bd65a
+//	kind: Certificate
+//	metadata:                                           Note that the owner
+//	  namespace: cert-1                                 reference does not
+//	  ownerReferences:                                  have a namespace,
+//	  - controller: true                                since owner refs
+//	    apiVersion: networking.k8s.io/v1beta1           only work inside
+//	    kind: Ingress                                   the same namespace.
+//	    name: ingress-1
+//	    blockOwnerDeletion: true
+//	    uid: 7d3897c2-ce27-4144-883a-e1b5f89bd65a
 func certificateHandler(queue workqueue.RateLimitingInterface) func(obj interface{}) {
 	return func(obj interface{}) {
 		cert, ok := obj.(*cmapi.Certificate)

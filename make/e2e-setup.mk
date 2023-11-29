@@ -1,3 +1,17 @@
+# Copyright 2023 The cert-manager Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # CRI_ARCH is meant for M1 users. By default, the images loaded into the local
 # cluster when running 'make -j e2e-setup' will match the architecture detected
 # by "uname -m" (e.g., arm64). Note that images that don't have an arm64
@@ -10,36 +24,42 @@ CRI_ARCH := $(HOST_ARCH)
 
 # TODO: this version is also defaulted in ./make/cluster.sh. Make it so that it
 # is set in one place only.
-K8S_VERSION := 1.24
+K8S_VERSION := 1.28
 
-IMAGE_ingressnginx_amd64 := k8s.gcr.io/ingress-nginx/controller:v1.1.0@sha256:7464dc90abfaa084204176bcc0728f182b0611849395787143f6854dc6c38c85
-IMAGE_kyverno_amd64 := ghcr.io/kyverno/kyverno:v1.7.1@sha256:aec4b029660d47aea025336150fdc2822c991f592d5170d754b6acaf158b513e
-IMAGE_kyvernopre_amd64 := ghcr.io/kyverno/kyvernopre:v1.7.1@sha256:1bcec6bc854720e22f439c6dcea02fcf689f31976babcf03a449d750c2b1f34a
-IMAGE_vault_amd64 := index.docker.io/library/vault:1.2.3@sha256:b1c86c9e173f15bb4a926e4144a63f7779531c30554ac7aee9b2a408b22b2c01
-IMAGE_bind_amd64 := docker.io/eafxx/bind:latest-9f74179f@sha256:0b8c766f5bedbcbe559c7970c8e923aa0c4ca771e62fcf8dba64ffab980c9a51
-IMAGE_sampleexternalissuer_amd64 := ghcr.io/cert-manager/sample-external-issuer/controller:v0.1.1@sha256:7dafe98c73d229bbac08067fccf9b2884c63c8e1412fe18f9986f59232cf3cb5
-IMAGE_projectcontour_amd64 := docker.io/projectcontour/contour:v1.20.1@sha256:10f6501cbb8514549b2ae71634152fa1a02e4ba63a9a32955d2ff027a0da1254
-IMAGE_pebble_amd64 := local/pebble:local
-IMAGE_vaultretagged_amd64 := local/vault:local
+IMAGE_ingressnginx_amd64 := registry.k8s.io/ingress-nginx/controller:v1.9.4@sha256:0115d7e01987c13e1be90b09c223c3e0d8e9a92e97c0421e712ad3577e2d78e5
+IMAGE_kyverno_amd64 := ghcr.io/kyverno/kyverno:v1.10.3@sha256:031d2da484f3d89c78007cbb1cf1d7ae992e069683a2cdca0a0efb63a63fc735
+IMAGE_kyvernopre_amd64 := ghcr.io/kyverno/kyvernopre:v1.10.3@sha256:5371ead07ebd09ff858f568a07b6807e8568772af61e626c9a0a5137bd7e62db
+IMAGE_vault_amd64 := docker.io/hashicorp/vault:1.14.1@sha256:436d056e8e2a96c7356720069c29229970466f4f686886289dcc94dfa21d3155
+IMAGE_bind_amd64 := docker.io/eafxx/bind:latest-ccf145d3@sha256:b6ea4da6cb689985a6729f20a1a2775b9211bdaebd2c956f22871624d4925db2
+IMAGE_sampleexternalissuer_amd64 := ghcr.io/cert-manager/sample-external-issuer/controller:v0.4.0@sha256:964b378fe0dda7fc38ce3f211c3b24c780e44cef13c39d3206de985bad67f294
+IMAGE_projectcontour_amd64 := ghcr.io/projectcontour/contour:v1.25.2@sha256:1570f04e96fb5e0ad71c2de61fee71c8d55b2fe5b7c827ce65e81bf7cc99bcbd
 
-IMAGE_ingressnginx_arm64 := k8s.gcr.io/ingress-nginx/controller:v1.1.0@sha256:86be28e506653cbe29214cb272d60e7c8841ddaf530da29aa22b1b1017faa956
-IMAGE_kyverno_arm64 := ghcr.io/kyverno/kyverno:v1.7.1@sha256:4355f1f65ea5e952886e929a15628f0c6704905035b4741c6f560378871c9335
-IMAGE_kyvernopre_arm64 := ghcr.io/kyverno/kyvernopre:v1.7.1@sha256:141234fb74242155c7b843180b90ee5fb6a20c9e77598bd9c138c687059cdafd
-IMAGE_vault_arm64 := index.docker.io/library/vault:1.2.3@sha256:226a269b83c4b28ff8a512e76f1e7b707eccea012e4c3ab4c7af7fff1777ca2d
-IMAGE_bind_arm64 := docker.io/eafxx/bind:latest-9f74179f@sha256:85de273f24762c0445035d36290a440e8c5a6a64e9ae6227d92e8b0b0dc7dd6d
-IMAGE_sampleexternalissuer_arm64 := # 🚧 NOT AVAILABLE FOR arm64 🚧
-IMAGE_projectcontour_arm64 := docker.io/projectcontour/contour:v1.20.1@sha256:19c453cbd127e62ff24a2d5a48f4bd2567f04ebcf499df711663db7a0a275303
-IMAGE_pebble_arm64 := local/pebble:local
-IMAGE_vaultretagged_arm64 := local/vault:local
+IMAGE_ingressnginx_arm64 := registry.k8s.io/ingress-nginx/controller:v1.9.4@sha256:3cdc716f0395886008c5e49972297adf1af87eeef472f71ff8de11bf53f25766
+IMAGE_kyverno_arm64 := ghcr.io/kyverno/kyverno:v1.10.3@sha256:acf77f4fd08056941b5640d9489d46f2a1777e29d574e51926eac5250144dbd2
+IMAGE_kyvernopre_arm64 := ghcr.io/kyverno/kyvernopre:v1.10.3@sha256:3ec997a6a26f600e4c2e439c3671e9f21c83a73bf486134eb6732481d0e371ca
+IMAGE_vault_arm64 := docker.io/hashicorp/vault:1.14.1@sha256:27dd264f3813c71a66792191db5382f0cf9eeaf1ae91770634911facfcfe4837
+IMAGE_bind_arm64 := docker.io/eafxx/bind:latest-ccf145d3@sha256:a302cff9f7ecfac0c3cfde1b53a614a81d16f93a247c838d3dac43384fefd9b4
+IMAGE_sampleexternalissuer_arm64 := ghcr.io/cert-manager/sample-external-issuer/controller:v0.4.0@sha256:bdff00089ec7581c0d12414ce5ad1c6ccf5b6cacbfb0b0804fefe5043a1cb849
+IMAGE_projectcontour_arm64 := ghcr.io/projectcontour/contour:v1.25.2@sha256:abbb2b7fee8eafddfd4ebd8e45510e6c1d86937461bc6934470ffb57211a9a8b
+
+PEBBLE_COMMIT = ba5f81dd80fa870cbc19326f2d5a46f45f0b5ee3
+
+LOCALIMAGE_pebble := local/pebble:local
+LOCALIMAGE_vaultretagged := local/vault:local
+LOCALIMAGE_samplewebhook := local/samplewebhook:local
 
 IMAGE_kind_amd64 := $(shell make/cluster.sh --show-image)
 IMAGE_kind_arm64 := $(IMAGE_kind_amd64)
 
-PEBBLE_COMMIT = ba5f81dd80fa870cbc19326f2d5a46f45f0b5ee3
-
-# TODO: move the installation commands in this file to separate scripts like those in https://github.com/cert-manager/cert-manager/tree/master/devel/addon for readability
+# TODO: considering moving the installation commands in this file to separate scripts for readability
 # Once that is done, we can consume this variable from ./make/config/lib.sh
 SERVICE_IP_PREFIX = 10.0.0
+
+# This variable is exported so that the Vault add-on in the E2E tests can set
+# the image reference of the locally loaded Docker image when it installs the
+# Vault Helm chart.
+# The Vault Docker image is loaded into kind by `make e2e-setup`.
+export E2E_VAULT_IMAGE := $(LOCALIMAGE_vaultretagged)
 
 .PHONY: e2e-setup-kind
 ## Create a Kubernetes cluster using Kind, which is required for `make e2e`.
@@ -63,10 +83,10 @@ e2e-setup-kind: kind-exists
 # used as a prerequisite. If we were to use .PHONY, then the file's
 # timestamp would not be used to check whether targets should be rebuilt,
 # and they would get constantly rebuilt.
-$(BINDIR)/scratch/kind-exists: make/config/kind/cluster.yaml preload-kind-image make/cluster.sh FORCE | $(BINDIR)/scratch $(BINDIR)/tools/kind $(BINDIR)/tools/kubectl $(BINDIR)/tools/yq
+$(BINDIR)/scratch/kind-exists: make/config/kind/cluster.yaml preload-kind-image make/cluster.sh FORCE | $(BINDIR)/scratch $(NEEDS_KIND) $(NEEDS_KUBECTL) $(NEEDS_YQ)
 	@$(eval KIND_CLUSTER_NAME ?= kind)
 	@make/cluster.sh --name $(KIND_CLUSTER_NAME)
-	@if [ "$(shell cat $@ 2>/dev/null)" != kind ]; then echo kind > $@; else touch $@; fi
+	@if [ "$(shell cat $@ 2>/dev/null)" != $(KIND_CLUSTER_NAME) ]; then echo $(KIND_CLUSTER_NAME) > $@; else touch $@; fi
 
 .PHONY: kind-exists
 kind-exists: $(BINDIR)/scratch/kind-exists
@@ -82,7 +102,7 @@ kind-exists: $(BINDIR)/scratch/kind-exists
 ## created.
 ##
 ## @category Development
-e2e-setup: e2e-setup-gatewayapi e2e-setup-certmanager e2e-setup-kyverno e2e-setup-vault e2e-setup-bind e2e-setup-sampleexternalissuer e2e-setup-samplewebhook e2e-setup-pebble e2e-setup-ingressnginx e2e-setup-projectcontour
+e2e-setup: e2e-setup-gatewayapi e2e-setup-certmanager e2e-setup-vault e2e-setup-bind e2e-setup-sampleexternalissuer e2e-setup-samplewebhook e2e-setup-pebble e2e-setup-ingressnginx e2e-setup-projectcontour
 
 # The function "image-tar" returns the path to the image tarball for a given
 # image name. For example:
@@ -106,6 +126,28 @@ define image-tar
 $(BINDIR)/downloaded/containers/$(CRI_ARCH)/$(if $(IMAGE_$(1)_$(CRI_ARCH)),$(subst :,+,$(IMAGE_$(1)_$(CRI_ARCH))),missing-$(1)).tar
 endef
 
+# The function "local-image-tar" returns the path to the image tarball for a given local
+# image name. For example:
+#
+#     $(call local-image-tar, samplewebhook)
+#
+# returns the following path:
+#
+#     $(BINDIR)/containers/samplewebhook+local.tar
+#                          <--------------------->
+#                          LOCALIMAGE_samplewebhook
+#                        (with ":" replaced with "+")
+#
+# Note the "+" signs. We replace all the "+" with ":" because ":" can't be used
+# in make targets. The "+" replacement is safe since it isn't a valid character
+# in image names.
+#
+# When an image isn't available, i.e., IMAGE_imagename is empty, we still
+# return a string of the form "$(BINDIR)/containers/missing-imagename.tar".
+define local-image-tar
+$(BINDIR)/containers/$(if $(LOCALIMAGE_$(1)),$(subst :,+,$(LOCALIMAGE_$(1))),missing-$(1)).tar
+endef
+
 # Let's separate the pulling of the Kind image so that more tasks can be
 # run in parallel when running "make -j e2e-setup". In CI, the Docker
 # engine being stripped on every job, we save the kind image to
@@ -113,44 +155,65 @@ endef
 # get the message "warning: undefined variable 'CI'".
 .PHONY: preload-kind-image
 ifeq ($(shell printenv CI),)
-preload-kind-image: | $(BINDIR)/tools/crane
+preload-kind-image:
 	@$(CTR) inspect $(IMAGE_kind_$(CRI_ARCH)) 2>/dev/null >&2 || (set -x; $(CTR) pull $(IMAGE_kind_$(CRI_ARCH)))
 else
-preload-kind-image: $(call image-tar,kind) | $(BINDIR)/tools/crane
+preload-kind-image: $(call image-tar,kind)
 	$(CTR) inspect $(IMAGE_kind_$(CRI_ARCH)) 2>/dev/null >&2 || $(CTR) load -i $<
 endif
 
-LOAD_TARGETS=load-$(call image-tar,ingressnginx) load-$(call image-tar,kyverno) load-$(call image-tar,kyvernopre) load-$(call image-tar,vault) load-$(call image-tar,bind) load-$(call image-tar,projectcontour) load-$(call image-tar,sampleexternalissuer) load-$(call image-tar,vaultretagged) load-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble.tar load-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook.tar load-$(BINDIR)/containers/cert-manager-controller-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-acmesolver-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-cainjector-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-webhook-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-ctl-linux-$(CRI_ARCH).tar
+LOAD_TARGETS=load-$(call image-tar,ingressnginx) load-$(call image-tar,kyverno) load-$(call image-tar,kyvernopre) load-$(call image-tar,bind) load-$(call image-tar,projectcontour) load-$(call image-tar,sampleexternalissuer) load-$(call local-image-tar,vaultretagged) load-$(call local-image-tar,pebble) load-$(call local-image-tar,samplewebhook) load-$(BINDIR)/containers/cert-manager-controller-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-acmesolver-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-cainjector-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-webhook-linux-$(CRI_ARCH).tar load-$(BINDIR)/containers/cert-manager-ctl-linux-$(CRI_ARCH).tar
 .PHONY: $(LOAD_TARGETS)
-$(LOAD_TARGETS): load-%: % $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kind
-	$(BINDIR)/tools/kind load image-archive --name=$(shell cat $(BINDIR)/scratch/kind-exists) $*
+$(LOAD_TARGETS): load-%: % $(BINDIR)/scratch/kind-exists | $(NEEDS_KIND)
+	$(KIND) load image-archive --name=$(shell cat $(BINDIR)/scratch/kind-exists) $*
 
+# Download a single-arch image
+#
+# The input variable IMAGE_example_ARCH must contain the digest of the single-arch image manifest,
+# NOT the multi-arch manifest.
+#
 # We use crane instead of docker when pulling images, which saves some time
 # since we don't care about having the image available to docker.
 #
 # We don't pull using both the digest and tag because crane replaces the
 # tag with "i-was-a-digest". We still check that the downloaded image
 # matches the digest.
-$(call image-tar,kyverno) $(call image-tar,kyvernopre) $(call image-tar,bind) $(call image-tar,projectcontour) $(call image-tar,sampleexternalissuer) $(call image-tar,vault) $(call image-tar,ingressnginx): $(BINDIR)/downloaded/containers/$(CRI_ARCH)/%.tar: | $(BINDIR)/tools/crane
+#
+# We check that the remote image tag and digest still match what is pinned in
+# the `IMAGE_example_arch` variables (above).
+# This is useful because:
+# 1. It tells us if the image maintainers have deliberately or maliciously
+#    pushed a different image and re-used an existing tag.
+# 2. It makes it easy to learn the new digest when updating the pinned image
+#    tag. The rule will fail and the new digest will be printed out.
+# 3. It prevents us accidentally using the wrong digest when we pin the images
+#    in the variables above.
+$(call image-tar,vault) $(call image-tar,kyverno) $(call image-tar,kyvernopre) $(call image-tar,bind) $(call image-tar,projectcontour) $(call image-tar,sampleexternalissuer) $(call image-tar,ingressnginx): $(BINDIR)/downloaded/containers/$(CRI_ARCH)/%.tar: | $(NEEDS_CRANE)
 	@$(eval IMAGE=$(subst +,:,$*))
 	@$(eval IMAGE_WITHOUT_DIGEST=$(shell cut -d@ -f1 <<<"$(IMAGE)"))
 	@$(eval DIGEST=$(subst $(IMAGE_WITHOUT_DIGEST)@,,$(IMAGE)))
 	@mkdir -p $(dir $@)
-	diff <(echo "$(DIGEST)  -" | cut -d: -f2) <($(BINDIR)/tools/crane manifest --platform=linux/$(CRI_ARCH) $(IMAGE) | sha256sum)
-	$(BINDIR)/tools/crane pull $(IMAGE_WITHOUT_DIGEST) $@ --platform=linux/$(CRI_ARCH)
+	diff <(echo "$(DIGEST)  -" | cut -d: -f2) <($(CRANE) manifest --platform=linux/$(CRI_ARCH) $(IMAGE_WITHOUT_DIGEST) | sha256sum)
+	$(CRANE) pull $(IMAGE_WITHOUT_DIGEST) $@ --platform=linux/$(CRI_ARCH)
 
-# Same as above, except it supports multiarch images.
-$(call image-tar,kind): $(BINDIR)/downloaded/containers/$(CRI_ARCH)/%.tar: | $(BINDIR)/tools/crane
-	@$(eval IMAGE=$(subst +,:,$*))
-	@$(eval IMAGE_WITHOUT_DIGEST=$(shell cut -d@ -f1 <<<"$(IMAGE)"))
-	@$(eval DIGEST=$(subst $(IMAGE_WITHOUT_DIGEST)@,,$(IMAGE)))
+# Download the Kind node image
+#
+# This is handled differently from the other image downloads, because:
+# 1. The pinned Kind image references are automatically generated using
+#    `hack/latest-kind-image.sh`.
+# 2. It uses digests that point to the multi-arch manifest, rather than the
+#    actual image.
+# 3. The Kind image tags DO change; each new Kind release has a set of Kind node
+#    images tagged using the Kubernetes version. Subsequent Kind releases may
+#    have an incompatible Kind node image format, but re-use the same Kubernetes
+#    version tags.
+$(call image-tar,kind): $(NEEDS_CRANE)
 	@mkdir -p $(dir $@)
-	diff <(echo "$(DIGEST)  -" | cut -d: -f2) <($(BINDIR)/tools/crane manifest $(IMAGE) | sha256sum)
-	$(BINDIR)/tools/crane pull $(IMAGE_WITHOUT_DIGEST) $@ --platform=linux/$(CRI_ARCH)
+	$(CRANE) pull $(IMAGE_kind_$(CRI_ARCH)) $@ --platform linux/$(CRI_ARCH)
 
 # Since we dynamically install Vault via Helm during the end-to-end tests,
 # we need its image to be retagged to a well-known tag "local/vault:local".
-$(call image-tar,vaultretagged): $(call image-tar,vault)
+$(call local-image-tar,vaultretagged): $(call image-tar,vault)
 	@mkdir -p /tmp/vault $(dir $@)
 	tar xf $< -C /tmp/vault
 	cat /tmp/vault/manifest.json | jq '.[0].RepoTags |= ["local/vault:local"]' -r > /tmp/vault/temp
@@ -158,7 +221,38 @@ $(call image-tar,vaultretagged): $(call image-tar,vault)
 	tar cf $@ -C /tmp/vault .
 	@rm -rf /tmp/vault
 
-FEATURE_GATES ?= AdditionalCertificateOutputFormats=true,ExperimentalCertificateSigningRequestControllers=true,ExperimentalGatewayAPISupport=true,ServerSideApply=true,LiteralCertificateSubject=true
+FEATURE_GATES ?= AdditionalCertificateOutputFormats=true,ExperimentalCertificateSigningRequestControllers=true,ExperimentalGatewayAPISupport=true,ServerSideApply=true,LiteralCertificateSubject=true,UseCertificateRequestBasicConstraints=true
+
+## Set this environment variable to a non empty string to cause cert-manager to
+## be installed using best-practice configuration settings, and to install
+## Kyverno with a policy that will cause cert-manager installation to fail
+## unless it conforms to the documented best-practices.
+## See https://cert-manager.io/docs/installation/best-practice/ for context.
+##
+##	make E2E_SETUP_OPTION_BESTPRACTICE=true e2e-setup
+##
+## @category Development
+E2E_SETUP_OPTION_BESTPRACTICE ?=
+## The URL of the Helm values file containing best-practice configuration values
+## which will allow cert-manager to be installed and used in a cluster where
+## Kyverno and the policies in make/config/kyverno have been applied.
+##
+## @category Development
+E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL ?= https://raw.githubusercontent.com/cert-manager/website/ea5db62772e6b9d1430b9d63f581e74d5c18b627/public/docs/installation/best-practice/values.best-practice.yaml
+E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL_SUM := $(shell sha256sum <<<$(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL) | cut -d ' ' -f 1)
+
+## A local Helm values file containing best-practice configuration values.
+## It will be downloaded from E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL if
+## it does not exist.
+##
+## @category Development
+E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_FILE ?= $(BINDIR)/scratch/values-bestpractice-$(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL_SUM).yaml
+$(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_FILE): | $(BINDIR)/scratch
+	$(CURL) $(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_URL) -o $@
+
+# Dependencies which will be added to e2e-setup-certmanager depending on the
+# supplied E2E_SETUP_OPTION_ variables.
+E2E_SETUP_OPTION_DEPENDENCIES := $(if $(E2E_SETUP_OPTION_BESTPRACTICE),e2e-setup-kyverno $(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_FILE))
 
 # In make, there is no way to escape commas or spaces. So we use the
 # variables $(space) and $(comma) instead.
@@ -168,19 +262,24 @@ comma = ,
 
 # Helm's "--set" interprets commas, which means we want to escape commas
 # for "--set featureGates". That's why we have "\$(comma)".
-feature_gates_controller := $(subst $(space),\$(comma),$(filter AllAlpha=% AllBeta=% AdditionalCertificateOutputFormats=% ValidateCAA=% ExperimentalCertificateSigningRequestControllers=% ExperimentalGatewayAPISupport=% ServerSideApply=% LiteralCertificateSubject=%, $(subst $(comma),$(space),$(FEATURE_GATES))))
+feature_gates_controller := $(subst $(space),\$(comma),$(filter AllAlpha=% AllBeta=% AdditionalCertificateOutputFormats=% ValidateCAA=% ExperimentalCertificateSigningRequestControllers=% ExperimentalGatewayAPISupport=% ServerSideApply=% LiteralCertificateSubject=% UseCertificateRequestBasicConstraints=% SecretsFilteredCaching=%, $(subst $(comma),$(space),$(FEATURE_GATES))))
 feature_gates_webhook := $(subst $(space),\$(comma),$(filter AllAlpha=% AllBeta=% AdditionalCertificateOutputFormats=% LiteralCertificateSubject=%,   $(subst $(comma),$(space),$(FEATURE_GATES))))
-feature_gates_cainjector := $(subst $(space),\$(comma),$(filter AllAlpha=% AllBeta=%, $(subst $(comma),$(space),$(FEATURE_GATES))))
+feature_gates_cainjector := $(subst $(space),\$(comma),$(filter AllAlpha=% AllBeta=% ServerSideApply=%, $(subst $(comma),$(space),$(FEATURE_GATES))))
 
+# Install cert-manager with E2E specific images and deployment settings.
+# The values.best-practice.yaml file is applied for compliance with the
+# Kyverno policy which has been installed in a pre-requisite target.
+#
 # TODO: move these commands to separate scripts for readability
 #
 # ⚠ The following components are installed *before* cert-manager:
 # * GatewayAPI: so that cert-manager can watch those CRs.
-# * Kyverno: so that it can check the cert-manager manifests against the policy in `config/kyverno/`.
+# * Kyverno: so that it can check the cert-manager manifests against the policy in `config/kyverno/`
+#		(only installed if E2E_SETUP_OPTION_BESTPRACTICE is set).
 .PHONY: e2e-setup-certmanager
-e2e-setup-certmanager: $(BINDIR)/cert-manager.tgz $(foreach binaryname,controller acmesolver cainjector webhook ctl,$(BINDIR)/containers/cert-manager-$(binaryname)-linux-$(CRI_ARCH).tar) $(foreach binaryname,controller acmesolver cainjector webhook ctl,load-$(BINDIR)/containers/cert-manager-$(binaryname)-linux-$(CRI_ARCH).tar) e2e-setup-gatewayapi e2e-setup-kyverno $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kubectl $(BINDIR)/tools/kind
+e2e-setup-certmanager: $(BINDIR)/cert-manager.tgz $(foreach binaryname,controller acmesolver cainjector webhook ctl,$(BINDIR)/containers/cert-manager-$(binaryname)-linux-$(CRI_ARCH).tar) $(foreach binaryname,controller acmesolver cainjector webhook ctl,load-$(BINDIR)/containers/cert-manager-$(binaryname)-linux-$(CRI_ARCH).tar) e2e-setup-gatewayapi $(E2E_SETUP_OPTION_DEPENDENCIES) $(BINDIR)/scratch/kind-exists | $(NEEDS_KUBECTL) $(NEEDS_KIND) $(NEEDS_HELM)
 	@$(eval TAG = $(shell tar xfO $(BINDIR)/containers/cert-manager-controller-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f2))
-	$(BINDIR)/tools/helm upgrade \
+	$(HELM) upgrade \
 		--install \
 		--create-namespace \
 		--wait \
@@ -188,27 +287,32 @@ e2e-setup-certmanager: $(BINDIR)/cert-manager.tgz $(foreach binaryname,controlle
 		--set image.repository="$(shell tar xfO $(BINDIR)/containers/cert-manager-controller-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f1)" \
 		--set cainjector.image.repository="$(shell tar xfO $(BINDIR)/containers/cert-manager-cainjector-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f1)" \
 		--set webhook.image.repository="$(shell tar xfO $(BINDIR)/containers/cert-manager-webhook-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f1)" \
+		--set acmesolver.image.repository="$(shell tar xfO $(BINDIR)/containers/cert-manager-acmesolver-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f1)" \
 		--set startupapicheck.image.repository="$(shell tar xfO $(BINDIR)/containers/cert-manager-ctl-linux-$(CRI_ARCH).tar manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f1)" \
 		--set image.tag="$(TAG)" \
 		--set cainjector.image.tag="$(TAG)" \
 		--set webhook.image.tag="$(TAG)" \
+		--set acmesolver.image.tag="$(TAG)" \
 		--set startupapicheck.image.tag="$(TAG)" \
 		--set installCRDs=true \
 		--set featureGates="$(feature_gates_controller)" \
-		--set "webhook.extraArgs={--feature-gates=$(feature_gates_webhook)}" \
+		--set "extraArgs={--kube-api-qps=9000,--kube-api-burst=9000,--concurrent-workers=200}" \
+		--set webhook.featureGates="$(feature_gates_webhook)" \
 		--set "cainjector.extraArgs={--feature-gates=$(feature_gates_cainjector)}" \
-		--set "extraArgs={--dns01-recursive-nameservers=$(SERVICE_IP_PREFIX).16:53,--dns01-recursive-nameservers-only=true,--acme-http01-solver-image=cert-manager-acmesolver-$(CRI_ARCH):$(TAG)}" \
+		--set "dns01RecursiveNameservers=$(SERVICE_IP_PREFIX).16:53" \
+		--set "dns01RecursiveNameserversOnly=true" \
+		$(if $(E2E_SETUP_OPTION_BESTPRACTICE),--values=$(E2E_SETUP_OPTION_BESTPRACTICE_HELM_VALUES_FILE)) \
 		cert-manager $< >/dev/null
 
 .PHONY: e2e-setup-bind
-e2e-setup-bind: $(call image-tar,bind) load-$(call image-tar,bind) $(wildcard make/config/bind/*.yaml) $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kubectl
+e2e-setup-bind: $(call image-tar,bind) load-$(call image-tar,bind) $(wildcard make/config/bind/*.yaml) $(BINDIR)/scratch/kind-exists | $(NEEDS_KUBECTL)
 	@$(eval IMAGE = $(shell tar xfO $< manifest.json | jq '.[0].RepoTags[0]' -r))
-	$(BINDIR)/tools/kubectl get ns bind 2>/dev/null >&2 || $(BINDIR)/tools/kubectl create ns bind
-	sed -e "s|{SERVICE_IP_PREFIX}|$(SERVICE_IP_PREFIX)|g" -e "s|{IMAGE}|$(IMAGE)|g" make/config/bind/*.yaml | $(BINDIR)/tools/kubectl apply -n bind -f - >/dev/null
+	$(KUBECTL) get ns bind 2>/dev/null >&2 || $(KUBECTL) create ns bind
+	sed -e "s|{SERVICE_IP_PREFIX}|$(SERVICE_IP_PREFIX)|g" -e "s|{IMAGE}|$(IMAGE)|g" make/config/bind/*.yaml | $(KUBECTL) apply -n bind -f - >/dev/null
 
 .PHONY: e2e-setup-gatewayapi
-e2e-setup-gatewayapi: $(BINDIR)/downloaded/gatewayapi-v$(GATEWAY_API_VERSION) $(BINDIR)/scratch/kind-exists $(BINDIR)/tools/kubectl
-	$(BINDIR)/tools/kubectl kustomize $</*/config/crd | $(BINDIR)/tools/kubectl apply -f - >/dev/null
+e2e-setup-gatewayapi: $(BINDIR)/downloaded/gateway-api-$(GATEWAY_API_VERSION).yaml $(BINDIR)/scratch/kind-exists $(NEEDS_KUBECTL)
+	$(KUBECTL) apply --server-side -f $(BINDIR)/downloaded/gateway-api-$(GATEWAY_API_VERSION).yaml > /dev/null
 
 
 # v1 NGINX-Ingress by default only watches Ingresses with Ingress class
@@ -219,16 +323,17 @@ e2e-setup-gatewayapi: $(BINDIR)/downloaded/gatewayapi-v$(GATEWAY_API_VERSION) $(
 # don't have a class, we pass a --watch-ingress-without-class flag:
 # https://github.com/kubernetes/ingress-nginx/blob/main/charts/ingress-nginx/values.yaml#L64-L67
 .PHONY: e2e-setup-ingressnginx
-e2e-setup-ingressnginx: $(call image-tar,ingressnginx) load-$(call image-tar,ingressnginx) | $(BINDIR)/tools/helm
+e2e-setup-ingressnginx: $(call image-tar,ingressnginx) load-$(call image-tar,ingressnginx) | $(NEEDS_HELM)
 	@$(eval TAG=$(shell tar xfO $< manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f2))
-	$(BINDIR)/tools/helm repo add ingress-nginx --force-update https://kubernetes.github.io/ingress-nginx >/dev/null
-	$(BINDIR)/tools/helm upgrade \
+	$(HELM) repo add ingress-nginx --force-update https://kubernetes.github.io/ingress-nginx >/dev/null
+	$(HELM) upgrade \
 		--install \
 		--wait \
-		--version 4.0.10 \
+		--version 4.7.3 \
 		--namespace ingress-nginx \
 		--create-namespace \
 		--set controller.image.tag=$(TAG) \
+		--set controller.image.registry=registry.k8s.io \
 		--set controller.image.digest= \
 		--set controller.image.pullPolicy=Never \
 		--set controller.service.clusterIP=${SERVICE_IP_PREFIX}.15 \
@@ -240,22 +345,22 @@ e2e-setup-ingressnginx: $(call image-tar,ingressnginx) load-$(call image-tar,ing
 		ingress-nginx ingress-nginx/ingress-nginx >/dev/null
 
 .PHONY: e2e-setup-kyverno
-e2e-setup-kyverno: $(call image-tar,kyverno) $(call image-tar,kyvernopre) load-$(call image-tar,kyverno) load-$(call image-tar,kyvernopre) make/config/kyverno/policy.yaml $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kubectl $(BINDIR)/tools/helm
+e2e-setup-kyverno: $(call image-tar,kyverno) $(call image-tar,kyvernopre) load-$(call image-tar,kyverno) load-$(call image-tar,kyvernopre) make/config/kyverno/policy.yaml $(BINDIR)/scratch/kind-exists | $(NEEDS_KUBECTL) $(NEEDS_HELM)
 	@$(eval TAG=$(shell tar xfO $< manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f2))
-	$(BINDIR)/tools/helm repo add kyverno --force-update https://kyverno.github.io/kyverno/ >/dev/null
-	$(BINDIR)/tools/helm upgrade \
+	$(HELM) repo add kyverno --force-update https://kyverno.github.io/kyverno/ >/dev/null
+	$(HELM) upgrade \
 		--install \
 		--wait \
 		--namespace kyverno \
 		--create-namespace \
-		--version v2.5.1 \
-		--set image.tag=v1.7.1 \
-		--set initImage.tag=v1.7.1 \
+		--version 3.0.4 \
+		--set image.tag=v1.8.1 \
+		--set initImage.tag=v1.8.1 \
 		--set image.pullPolicy=Never \
 		--set initImage.pullPolicy=Never \
 		kyverno kyverno/kyverno >/dev/null
-	@$(BINDIR)/tools/kubectl create ns cert-manager >/dev/null 2>&1 || true
-	$(BINDIR)/tools/kubectl apply -f make/config/kyverno/policy.yaml >/dev/null
+	@$(KUBECTL) create ns cert-manager >/dev/null 2>&1 || true
+	$(KUBECTL) apply --server-side -f make/config/kyverno/policy.yaml >/dev/null
 
 $(BINDIR)/downloaded/pebble-$(PEBBLE_COMMIT).tar.gz: | $(BINDIR)/downloaded
 	$(CURL) https://github.com/letsencrypt/pebble/archive/$(PEBBLE_COMMIT).tar.gz -o $@
@@ -263,12 +368,12 @@ $(BINDIR)/downloaded/pebble-$(PEBBLE_COMMIT).tar.gz: | $(BINDIR)/downloaded
 # We can't use GOBIN with "go install" because cross-compilation is not
 # possible with go install. That's a problem when cross-compiling for
 # linux/arm64 when running on darwin/arm64.
-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble/pebble: $(BINDIR)/downloaded/pebble-$(PEBBLE_COMMIT).tar.gz $(DEPENDS_ON_GO)
+$(call local-image-tar,pebble).dir/pebble: $(BINDIR)/downloaded/pebble-$(PEBBLE_COMMIT).tar.gz | $(NEEDS_GO)
 	@mkdir -p $(dir $@)
-	tar xzf $< -C $(dir $@)
-	cd $(dir $@)pebble-$(PEBBLE_COMMIT) && GOOS=linux GOARCH=$(CRI_ARCH) CGO_ENABLED=$(CGO_ENABLED) GOMAXPROCS=$(GOBUILDPROCS) $(GOBUILD) $(GOFLAGS) -o $(CURDIR)/$@ ./cmd/pebble
+	tar xzf $< -C /tmp
+	cd /tmp/pebble-$(PEBBLE_COMMIT) && GOOS=linux GOARCH=$(CRI_ARCH) CGO_ENABLED=$(CGO_ENABLED) GOMAXPROCS=$(GOBUILDPROCS) $(GOBUILD) $(GOFLAGS) -o $(CURDIR)/$@ ./cmd/pebble
 
-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble.tar: $(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble/pebble make/config/pebble/Containerfile.pebble
+$(call local-image-tar,pebble): $(call local-image-tar,pebble).dir/pebble make/config/pebble/Containerfile.pebble
 	@$(eval BASE := BASE_IMAGE_controller-linux-$(CRI_ARCH))
 	$(CTR) build --quiet \
 		-f make/config/pebble/Containerfile.pebble \
@@ -278,19 +383,19 @@ $(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble.tar: $(BINDIR)/downloaded/con
 	$(CTR) save local/pebble:local -o $@ >/dev/null
 
 .PHONY: e2e-setup-pebble
-e2e-setup-pebble: load-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/pebble.tar $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/helm
-	$(BINDIR)/tools/helm upgrade \
+e2e-setup-pebble: load-$(call local-image-tar,pebble) $(BINDIR)/scratch/kind-exists | $(NEEDS_HELM)
+	$(HELM) upgrade \
 		--install \
 		--wait \
 		--namespace pebble \
 		--create-namespace \
 		pebble make/config/pebble/chart >/dev/null
 
-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook/samplewebhook: make/config/samplewebhook/sample/main.go $(DEPENDS_ON_GO)
+$(call local-image-tar,samplewebhook).dir/samplewebhook: make/config/samplewebhook/sample/main.go | $(NEEDS_GO)
 	@mkdir -p $(dir $@)
 	GOOS=linux GOARCH=$(CRI_ARCH) $(GOBUILD) -o $@ $(GOFLAGS) make/config/samplewebhook/sample/main.go
 
-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook.tar: $(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook/samplewebhook make/config/samplewebhook/Containerfile.samplewebhook
+$(call local-image-tar,samplewebhook): $(call local-image-tar,samplewebhook).dir/samplewebhook make/config/samplewebhook/Containerfile.samplewebhook
 	@$(eval BASE := BASE_IMAGE_controller-linux-$(CRI_ARCH))
 	$(CTR) build --quiet \
 		-f make/config/samplewebhook/Containerfile.samplewebhook \
@@ -300,8 +405,8 @@ $(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook.tar: $(BINDIR)/downloa
 	$(CTR) save local/samplewebhook:local -o $@ >/dev/null
 
 .PHONY: e2e-setup-samplewebhook
-e2e-setup-samplewebhook: load-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/samplewebhook.tar e2e-setup-certmanager $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/helm
-	$(BINDIR)/tools/helm upgrade \
+e2e-setup-samplewebhook: load-$(call local-image-tar,samplewebhook) e2e-setup-certmanager $(BINDIR)/scratch/kind-exists | $(NEEDS_HELM)
+	$(HELM) upgrade \
 		--install \
 		--wait \
 		--namespace samplewebhook \
@@ -309,38 +414,49 @@ e2e-setup-samplewebhook: load-$(BINDIR)/downloaded/containers/$(CRI_ARCH)/sample
 		samplewebhook make/config/samplewebhook/chart >/dev/null
 
 .PHONY: e2e-setup-projectcontour
-e2e-setup-projectcontour: load-$(call image-tar,projectcontour) make/config/projectcontour/contour-gateway.yaml make/config/projectcontour/gateway.yaml $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kubectl $(BINDIR)/tools/ytt
-	$(BINDIR)/tools/ytt --data-value service_ip_prefix="${SERVICE_IP_PREFIX}" \
-		--file make/config/projectcontour/contour-gateway.yaml \
-		--file make/config/projectcontour/gateway.yaml | $(BINDIR)/tools/kubectl apply -f-
+e2e-setup-projectcontour: $(call image-tar,projectcontour) load-$(call image-tar,projectcontour) make/config/projectcontour/gateway.yaml make/config/projectcontour/contour.yaml $(BINDIR)/scratch/kind-exists | $(NEEDS_HELM) $(NEEDS_KUBECTL)
+	@$(eval TAG=$(shell tar xfO $< manifest.json | jq '.[0].RepoTags[0]' -r | cut -d: -f2))
+	$(HELM) repo add bitnami --force-update https://charts.bitnami.com/bitnami >/dev/null
+	# Warning: When upgrading the version of this helm chart, bear in mind that the IMAGE_projectcontour_* images above might need to be updated, too.
+	# Each helm chart version in the bitnami repo corresponds to an underlying application version. Check application versions and chart versions with:
+	# $$ helm search repo bitnami -l | grep -E "contour[^-]"
+	$(HELM) upgrade \
+		--install \
+		--wait \
+		--version 12.2.4 \
+		--namespace projectcontour \
+		--create-namespace \
+		--set contour.ingressClass.create=false \
+		--set contour.ingressClass.default=false \
+		--set image.tag=$(TAG) \
+		--set image.pullPolicy=Never \
+		--set contour.service.type=ClusterIP \
+		--set contour.service.externalTrafficPolicy="" \
+		--set envoy.service.type=ClusterIP \
+		--set envoy.service.externalTrafficPolicy="" \
+		--set envoy.service.clusterIP=${SERVICE_IP_PREFIX}.14 \
+		--set-file configInline=make/config/projectcontour/contour.yaml \
+		projectcontour bitnami/contour >/dev/null
+	$(KUBECTL) apply --server-side -f make/config/projectcontour/gateway.yaml
 
 .PHONY: e2e-setup-sampleexternalissuer
-ifeq ($(CRI_ARCH),amd64)
-e2e-setup-sampleexternalissuer: load-$(call image-tar,sampleexternalissuer) $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kubectl
-	$(BINDIR)/tools/kubectl apply -n sample-external-issuer-system -f https://github.com/cert-manager/sample-external-issuer/releases/download/v0.1.1/install.yaml >/dev/null
-	$(BINDIR)/tools/kubectl patch -n sample-external-issuer-system deployments.apps sample-external-issuer-controller-manager --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/1/imagePullPolicy", "value": "Never"}]' >/dev/null
-else
-e2e-setup-sampleexternalissuer:
-	@printf "\033[0;33mWarning\033[0;0m: skipping the target \033[0;31m$@\033[0;0m because there exists no image for $(CRI_ARCH).\n" >&2
-	@printf "The end-to-end tests that rely on sampleexternalissuer will fail. If you are using Docker Desktop,\n" >&2
-	@printf "you can force using the amd64 image anyways by running:\n" >&2
-	@printf "    \033[0;36mmake $@ CRI_ARCH=amd64\033[0;0m\n" >&2
-	@printf "Note that this won't if you are using Colima, or Rancher Desktop, or minikube.\n" >&2
-endif
+e2e-setup-sampleexternalissuer: load-$(call image-tar,sampleexternalissuer) $(BINDIR)/scratch/kind-exists | $(NEEDS_KUBECTL)
+	$(KUBECTL) apply -n sample-external-issuer-system -f https://github.com/cert-manager/sample-external-issuer/releases/download/v0.4.0/install.yaml >/dev/null
+	$(KUBECTL) patch -n sample-external-issuer-system deployments.apps sample-external-issuer-controller-manager --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/1/imagePullPolicy", "value": "Never"}]' >/dev/null
 
 # Note that the end-to-end tests are dealing with the Helm installation. We
 # do not need to Helm install here.
 .PHONY: e2e-setup-vault
-e2e-setup-vault: load-$(call image-tar,vaultretagged) $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/helm
+e2e-setup-vault: load-$(call local-image-tar,vaultretagged) $(BINDIR)/scratch/kind-exists | $(NEEDS_HELM)
 
 # Exported because it needs to flow down to make/e2e.sh.
 export ARTIFACTS ?= $(shell pwd)/$(BINDIR)/artifacts
 
 .PHONY: kind-logs
-kind-logs: $(BINDIR)/scratch/kind-exists | $(BINDIR)/tools/kind
+kind-logs: $(BINDIR)/scratch/kind-exists | $(NEEDS_KIND)
 	rm -rf $(ARTIFACTS)/cert-manager-e2e-logs
 	mkdir -p $(ARTIFACTS)/cert-manager-e2e-logs
-	$(BINDIR)/tools/kind export logs $(ARTIFACTS)/cert-manager-e2e-logs --name=$(shell cat $(BINDIR)/scratch/kind-exists)
+	$(KIND) export logs $(ARTIFACTS)/cert-manager-e2e-logs --name=$(shell cat $(BINDIR)/scratch/kind-exists)
 
 $(BINDIR)/scratch:
 	@mkdir -p $@

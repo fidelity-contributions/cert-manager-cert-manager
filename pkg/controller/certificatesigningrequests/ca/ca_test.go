@@ -23,7 +23,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"math"
 	"math/big"
@@ -59,26 +58,20 @@ var (
 	fixedClock      = fakeclock.NewFakeClock(fixedClockStart)
 )
 
-func generateCSR(t *testing.T, secretKey crypto.Signer, sigAlg x509.SignatureAlgorithm) []byte {
-	template := x509.CertificateRequest{
-		Subject: pkix.Name{
-			CommonName: "test",
-		},
-		SignatureAlgorithm: sigAlg,
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, secretKey)
+func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
+	csr, err := gen.CSRWithSigner(secretKey,
+		gen.SetCSRCommonName("test"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	return csr
 }
 
 func generateSelfSignedCACert(t *testing.T, key crypto.Signer, name string) (*x509.Certificate, []byte) {
 	tmpl := &x509.Certificate{
-		Version:               2,
+		Version:               3,
 		BasicConstraintsValid: true,
 		SerialNumber:          big.NewInt(0),
 		Subject: pkix.Name{
@@ -124,7 +117,7 @@ func TestSign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testCSR := generateCSR(t, testpk, x509.ECDSAWithSHA256)
+	testCSR := generateCSR(t, testpk)
 
 	baseCSRNotApproved := gen.CertificateSigningRequest("test-cr",
 		gen.SetCertificateSigningRequestIsCA(true),
@@ -173,7 +166,7 @@ func TestSign(t *testing.T) {
 	badDataSecret := ecCASecret.DeepCopy()
 	badDataSecret.Data[corev1.TLSPrivateKeyKey] = []byte("bad key")
 
-	template, err := pki.GenerateTemplateFromCertificateSigningRequest(baseCSR)
+	template, err := pki.CertificateTemplateFromCertificateSigningRequest(baseCSR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +465,7 @@ func TestSign(t *testing.T) {
 			templateGenerator: func(csr *certificatesv1.CertificateSigningRequest) (*x509.Certificate, error) {
 				// Pass the given CSR to a "real" template generator to ensure that it
 				// doesn't err. Return the pre-generated template.
-				_, err := pki.GenerateTemplateFromCertificateSigningRequest(csr)
+				_, err := pki.CertificateTemplateFromCertificateSigningRequest(csr)
 				if err != nil {
 					return nil, err
 				}
@@ -606,7 +599,7 @@ func TestCA_Sign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testCSR := generateCSR(t, testpk, x509.ECDSAWithSHA256)
+	testCSR := generateCSR(t, testpk)
 
 	tests := map[string]struct {
 		givenCASecret    *corev1.Secret
@@ -712,6 +705,20 @@ func TestCA_Sign(t *testing.T) {
 				assert.Equal(t, []string{"http://ocsp-v3.example.org"}, got.OCSPServer)
 			},
 		},
+		"when the Issuer has issuingCertificateURLs set, it should appear on the signed ca": {
+			givenCASecret: gen.SecretFrom(gen.Secret("secret-1"), gen.SetSecretNamespace("default"), gen.SetSecretData(secretDataFor(t, rootPK, rootCert))),
+			givenCAIssuer: gen.Issuer("issuer-1", gen.SetIssuerCA(cmapi.CAIssuer{
+				SecretName:             "secret-1",
+				IssuingCertificateURLs: []string{"http://ca.example.com/ca.crt"},
+			})),
+			givenCSR: gen.CertificateSigningRequest("cr-1",
+				gen.SetCertificateSigningRequestRequest(testCSR),
+				gen.SetCertificateSigningRequestSignerName("issuers.cert-manager.io/"+gen.DefaultTestNamespace+".issuer-1"),
+			),
+			assertSignedCert: func(t *testing.T, got *x509.Certificate) {
+				assert.Equal(t, []string{"http://ca.example.com/ca.crt"}, got.IssuingCertificateURL)
+			},
+		},
 		"when the Issuer has crlDistributionPoints set, it should appear on the signed ca ": {
 			givenCASecret: gen.SecretFrom(gen.Secret("secret-1"), gen.SetSecretNamespace("default"), gen.SetSecretData(secretDataFor(t, rootPK, rootCert))),
 			givenCAIssuer: gen.Issuer("issuer-1", gen.SetIssuerCA(cmapi.CAIssuer{
@@ -750,7 +757,7 @@ func TestCA_Sign(t *testing.T) {
 				secretsLister: testlisters.FakeSecretListerFrom(testlisters.NewFakeSecretLister(),
 					testlisters.SetFakeSecretNamespaceListerGet(test.givenCASecret, nil),
 				),
-				templateGenerator: pki.GenerateTemplateFromCertificateSigningRequest,
+				templateGenerator: pki.CertificateTemplateFromCertificateSigningRequest,
 				signingFn:         pki.SignCSRTemplate,
 			}
 

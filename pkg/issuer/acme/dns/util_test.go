@@ -102,7 +102,7 @@ func buildFakeSolver(b *test.Builder, dnsProviders dnsProviderConstructors) *Sol
 	b.InitWithRESTConfig()
 	s := &Solver{
 		Context:                 b.Context,
-		secretLister:            b.Context.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+		secretLister:            b.Context.KubeSharedInformerFactory.Secrets().Lister(),
 		dnsProviderConstructors: dnsProviders,
 	}
 	b.Start()
@@ -151,7 +151,7 @@ func newFakeDNSProviders() *fakeDNSProviders {
 			f.call("acmedns", host, accountJson, dns01Nameservers)
 			return nil, nil
 		},
-		digitalOcean: func(token string, dns01Nameservers []string) (*digitalocean.DNSProvider, error) {
+		digitalOcean: func(token string, dns01Nameservers []string, userAgent string) (*digitalocean.DNSProvider, error) {
 			f.call("digitalocean", token, util.RecursiveNameservers)
 			return nil, nil
 		},

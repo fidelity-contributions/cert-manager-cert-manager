@@ -20,35 +20,67 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
-	"strings"
 
-	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmutil "github.com/cert-manager/cert-manager/pkg/util"
 	utilpki "github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
-// AnnotationsForCertificateSecret returns a map which is set on all
+// AnnotationsForCertificate returns a map which is set on all
 // Certificate Secret's Annotations when issued. These annotations contain
-// information about the Issuer and Certificate.
-// If the X.509 certificate is not-nil, additional annotations will be added
-// relating to its Common Name and Subject Alternative Names.
-func AnnotationsForCertificateSecret(crt *cmapi.Certificate, certificate *x509.Certificate) map[string]string {
+// information about the Certificate.
+// If the X.509 certificate is nil, an empty map will be returned.
+func AnnotationsForCertificate(certificate *x509.Certificate) (map[string]string, error) {
 	annotations := make(map[string]string)
 
-	annotations[cmapi.CertificateNameKey] = crt.Name
-	annotations[cmapi.IssuerNameAnnotationKey] = crt.Spec.IssuerRef.Name
-	annotations[cmapi.IssuerKindAnnotationKey] = apiutil.IssuerKind(crt.Spec.IssuerRef)
-	annotations[cmapi.IssuerGroupAnnotationKey] = crt.Spec.IssuerRef.Group
-
-	// Only add certificate data if certificate is non-nil.
-	if certificate != nil {
-		annotations[cmapi.CommonNameAnnotationKey] = certificate.Subject.CommonName
-		annotations[cmapi.AltNamesAnnotationKey] = strings.Join(certificate.DNSNames, ",")
-		annotations[cmapi.IPSANAnnotationKey] = strings.Join(utilpki.IPAddressesToString(certificate.IPAddresses), ",")
-		annotations[cmapi.URISANAnnotationKey] = strings.Join(utilpki.URLsToString(certificate.URIs), ",")
+	if certificate == nil {
+		return annotations, nil
 	}
 
-	return annotations
+	// TODO: the reason that for some annotations we keep empty annotations and we don't for others is not clear.
+	// The keepEmpty parameter is only used here to maintain this unexplained previous behaviour.
+
+	var encodingErr error
+	addStringAnnotation := func(keepEmpty bool, key string, value string) {
+		if len(value) == 0 && !keepEmpty {
+			return
+		}
+		annotations[key] = value
+	}
+	addCSVEncodedAnnotation := func(keepEmpty bool, key string, values []string) {
+		if len(values) == 0 && !keepEmpty {
+			return
+		}
+
+		csvString, err := cmutil.JoinWithEscapeCSV(values)
+		if err != nil {
+			encodingErr = err
+			return
+		}
+		annotations[key] = csvString
+	}
+
+	addStringAnnotation(true, cmapi.CommonNameAnnotationKey, certificate.Subject.CommonName)
+	addStringAnnotation(false, cmapi.SubjectSerialNumberAnnotationKey, certificate.Subject.SerialNumber)
+
+	addCSVEncodedAnnotation(false, cmapi.SubjectOrganizationsAnnotationKey, certificate.Subject.Organization)
+	addCSVEncodedAnnotation(false, cmapi.SubjectOrganizationalUnitsAnnotationKey, certificate.Subject.OrganizationalUnit)
+	addCSVEncodedAnnotation(false, cmapi.SubjectCountriesAnnotationKey, certificate.Subject.Country)
+	addCSVEncodedAnnotation(false, cmapi.SubjectProvincesAnnotationKey, certificate.Subject.Province)
+	addCSVEncodedAnnotation(false, cmapi.SubjectLocalitiesAnnotationKey, certificate.Subject.Locality)
+	addCSVEncodedAnnotation(false, cmapi.SubjectPostalCodesAnnotationKey, certificate.Subject.PostalCode)
+	addCSVEncodedAnnotation(false, cmapi.SubjectStreetAddressesAnnotationKey, certificate.Subject.StreetAddress)
+
+	addCSVEncodedAnnotation(false, cmapi.EmailsAnnotationKey, certificate.EmailAddresses)
+	addCSVEncodedAnnotation(true, cmapi.AltNamesAnnotationKey, certificate.DNSNames)
+	addCSVEncodedAnnotation(true, cmapi.IPSANAnnotationKey, utilpki.IPAddressesToString(certificate.IPAddresses))
+	addCSVEncodedAnnotation(true, cmapi.URISANAnnotationKey, utilpki.URLsToString(certificate.URIs))
+
+	if encodingErr != nil {
+		return nil, encodingErr
+	}
+
+	return annotations, nil
 }
 
 // OutputFormatDER returns the byte slice of the private key in DER format. To

@@ -44,6 +44,10 @@ func ValidateCertificateSpec(crt *internalcmapi.CertificateSpec, fldPath *field.
 	el := field.ErrorList{}
 	if crt.SecretName == "" {
 		el = append(el, field.Required(fldPath.Child("secretName"), "must be specified"))
+	} else {
+		for _, msg := range apivalidation.NameIsDNSSubdomain(crt.SecretName, false) {
+			el = append(el, field.Invalid(fldPath.Child("secretName"), crt.SecretName, msg))
+		}
 	}
 
 	el = append(el, validateIssuerRef(crt.IssuerRef, fldPath)...)
@@ -55,7 +59,7 @@ func ValidateCertificateSpec(crt *internalcmapi.CertificateSpec, fldPath *field.
 			el = append(el, field.Forbidden(fldPath.Child("literalSubject"), "Feature gate LiteralCertificateSubject must be enabled on both webhook and controller to use the alpha `literalSubject` field"))
 		}
 
-		sequence, err := pki.ParseSubjectStringToRdnSequence(crt.LiteralSubject)
+		sequence, err := pki.UnmarshalSubjectStringToRDNSequence(crt.LiteralSubject)
 		if err != nil {
 			el = append(el, field.Invalid(fldPath.Child("literalSubject"), crt.LiteralSubject, err.Error()))
 		}

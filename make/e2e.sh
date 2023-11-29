@@ -24,7 +24,6 @@ set -e
 _default_bindir=$(make print-bindir)
 
 BINDIR=${BINDIR:-$_default_bindir}
-ARTIFACTS=${ARTIFACTS:-$(pwd)/$BINDIR/artifacts}
 
 # Why do we only run 20 tests concurrently? Because we have noticed that
 # many tests start timing out when the Prow pod gets overloaded. We are
@@ -70,11 +69,18 @@ ARTIFACTS=${ARTIFACTS:-$(pwd)/$BINDIR/artifacts}
 #  [5]: https://prow.build-infra.jetstack.net/view/gs/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/4968/pull-cert-manager-make-e2e-v1-23/1507011895024947200
 #  [6]: https://prow.build-infra.jetstack.net/view/gs/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/4968/pull-cert-manager-make-e2e-v1-23/1507019887451574272
 #  [7]: https://prow.build-infra.jetstack.net/view/gs/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/4968/pull-cert-manager-make-e2e-v1-23/1507040653668782080
-nodes=20
+
+nodes=40
+
 flake_attempts=1
+
 ginkgo_skip=
 ginkgo_focus=
-feature_gates=AdditionalCertificateOutputFormats=true,ExperimentalCertificateSigningRequestControllers=true,ExperimentalGatewayAPISupport=true
+
+feature_gates=AdditionalCertificateOutputFormats=true,ExperimentalCertificateSigningRequestControllers=true,ExperimentalGatewayAPISupport=true,LiteralCertificateSubject=true
+
+artifacts="./$BINDIR/artifacts"
+
 help() {
   cat <<EOF | color ""
 Runs the end-to-end test suite against an already configured kind cluster.
@@ -106,7 +112,7 @@ Environment variables:
       to $feature_gates
   ${green}ARTIFACTS${end}
       The path to a directory where the JUnit XML files will be stored. By
-      default, the JUnit XML files are saved to ./$BINDIR/artifacts
+      default, the JUnit XML files are saved to $artifacts
 
 Details:
   Imagine you got the following failure:
@@ -149,26 +155,11 @@ if [ $# -gt 0 ]; then
   esac
 fi
 
-for v in FEATURE_GATES FLAKE_ATTEMPTS NODES GINKGO_FOCUS GINKGO_SKIP; do
+for v in FEATURE_GATES FLAKE_ATTEMPTS NODES GINKGO_FOCUS GINKGO_SKIP ARTIFACTS; do
   if printenv "$v" >/dev/null && [ -n "${!v}" ]; then
     eval "$(tr '[:upper:]' '[:lower:]' <<<"$v")=\"${!v}\""
   fi
 done
-
-# Skip Gateway tests for Kubernetes below v1.19.
-k8s_version=$(kubectl version -oyaml | yq e '.serverVersion | .major +"."+ .minor' -)
-case "$k8s_version" in
-1.16* | 1.17* | 1.18*)
-  printf "${yel}${warn}Warning${end}: Kubernetes version ${k8s_version}, skipping Gateway tests.\n" >&2
-
-  if [[ -z "$ginkgo_skip" ]]; then
-    ginkgo_skip="Gateway"
-  else
-    # duplicates are ok
-    ginkgo_skip="${ginkgo_skip}|Gateway"
-  fi
-  ;;
-esac
 
 ginkgo_args=("$@")
 
@@ -185,18 +176,32 @@ if [[ "${ginkgo_args[*]}" =~ ginkgo.focus ]]; then
   ginkgo_args+=(--ginkgo.v --test.v)
 fi
 
-mkdir -p "${ARTIFACTS}"
+ginkgo_color=
+
+if ! should_color; then
+	ginkgo_color="--no-color"
+fi
+
+mkdir -p "$artifacts"
 
 export CGO_ENABLED=0
 
 trace ginkgo \
-  -nodes "$nodes" \
-  -flakeAttempts "$flake_attempts" \
-  -tags e2e_test \
+  --tags=e2e_test \
+  --procs="$nodes" \
+  --output-dir="$artifacts" \
+  --junit-report="junit__01.xml" \
+  --flake-attempts="$flake_attempts" \
+  --timeout="1h" \
+  $ginkgo_color \
+  -v \
+  --randomize-all \
+  --trace \
+  --poll-progress-after=60s \
   ./test/e2e/ \
   -- \
   --repo-root="$PWD" \
-  --report-dir="${ARTIFACTS}" \
+  --report-dir="$artifacts" \
   --acme-dns-server="${SERVICE_IP_PREFIX}.16" \
   --acme-ingress-ip="${SERVICE_IP_PREFIX}.15" \
   --acme-gateway-ip="${SERVICE_IP_PREFIX}.14" \

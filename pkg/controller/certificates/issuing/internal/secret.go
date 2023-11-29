@@ -27,10 +27,10 @@ import (
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	applymetav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 
 	"github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
@@ -45,7 +45,7 @@ var (
 // SecretsManager creates and updates secrets with certificate and key data.
 type SecretsManager struct {
 	secretClient coreclient.SecretsGetter
-	secretLister corelisters.SecretLister
+	secretLister internalinformers.SecretLister
 
 	// fieldManager is the manager name used for the Apply operations on Secrets.
 	fieldManager string
@@ -59,7 +59,9 @@ type SecretsManager struct {
 
 // SecretData is a structure wrapping private key, Certificate and CA data
 type SecretData struct {
-	PrivateKey, Certificate, CA []byte
+	PrivateKey, Certificate, CA         []byte
+	CertificateName                     string
+	IssuerName, IssuerKind, IssuerGroup string
 }
 
 // NewSecretsManager returns a new SecretsManager. Setting
@@ -67,7 +69,7 @@ type SecretData struct {
 // when the corresponding Certificate is deleted.
 func NewSecretsManager(
 	secretClient coreclient.SecretsGetter,
-	secretLister corelisters.SecretLister,
+	secretLister internalinformers.SecretLister,
 	fieldManager string,
 	enableSecretOwnerReferences bool,
 ) *SecretsManager {
@@ -150,17 +152,10 @@ func (s *SecretsManager) setValues(crt *cmapi.Certificate, secret *corev1.Secret
 		secret.Data[cmmeta.TLSCAKey] = data.CA
 	}
 
-	var certificate *x509.Certificate
-	if len(data.Certificate) > 0 {
-		var err error
-		certificate, err = utilpki.DecodeX509CertificateBytes(data.Certificate)
-		// TODO: handle InvalidData here?
-		if err != nil {
-			return err
-		}
+	if secret.Annotations == nil {
+		secret.Annotations = make(map[string]string)
 	}
 
-	secret.Annotations = certificates.AnnotationsForCertificateSecret(crt, certificate)
 	if secret.Labels == nil {
 		secret.Labels = make(map[string]string)
 	}
@@ -173,6 +168,39 @@ func (s *SecretsManager) setValues(crt *cmapi.Certificate, secret *corev1.Secret
 			secret.Annotations[k] = v
 		}
 	}
+
+	var certificate *x509.Certificate
+	if len(data.Certificate) > 0 {
+		var err error
+		certificate, err = utilpki.DecodeX509CertificateBytes(data.Certificate)
+		// TODO: handle InvalidData here? Maybe we should still patch the secret
+		// when we detect that the certificate bytes are invalid.
+		if err != nil {
+			return err
+		}
+	}
+
+	certificateDetailsAnnotations, err := certificates.AnnotationsForCertificate(certificate)
+	if err != nil {
+		return err
+	}
+	for k, v := range certificateDetailsAnnotations {
+		secret.Annotations[k] = v
+	}
+
+	// Add the certificate name and issuer details to the secret annotations.
+	// If the annotations are not set/ empty, we do not use them to determine
+	// if the secret needs to be updated.
+	if data.CertificateName != "" {
+		secret.Annotations[cmapi.CertificateNameKey] = data.CertificateName
+	}
+	if data.IssuerName != "" || data.IssuerKind != "" || data.IssuerGroup != "" {
+		secret.Annotations[cmapi.IssuerNameAnnotationKey] = data.IssuerName
+		secret.Annotations[cmapi.IssuerKindAnnotationKey] = data.IssuerKind
+		secret.Annotations[cmapi.IssuerGroupAnnotationKey] = data.IssuerGroup
+	}
+
+	secret.Labels[cmapi.PartOfCertManagerControllerLabelKey] = "true"
 
 	return nil
 }
@@ -235,7 +263,7 @@ func (s *SecretsManager) setKeystores(crt *cmapi.Certificate, secret *corev1.Sec
 			return fmt.Errorf("error encoding PKCS12 bundle: %w", err)
 		}
 		// always overwrite the keystore entry for now
-		secret.Data[pkcs12SecretKey] = keystoreData
+		secret.Data[cmapi.PKCS12SecretKey] = keystoreData
 
 		if len(data.CA) > 0 {
 			truststoreData, err := encodePKCS12Truststore(string(pw), data.CA)
@@ -243,7 +271,7 @@ func (s *SecretsManager) setKeystores(crt *cmapi.Certificate, secret *corev1.Sec
 				return fmt.Errorf("error encoding PKCS12 trust store bundle: %w", err)
 			}
 			// always overwrite the truststore entry
-			secret.Data[pkcs12TruststoreKey] = truststoreData
+			secret.Data[cmapi.PKCS12TruststoreKey] = truststoreData
 		}
 	}
 
@@ -263,7 +291,7 @@ func (s *SecretsManager) setKeystores(crt *cmapi.Certificate, secret *corev1.Sec
 			return fmt.Errorf("error encoding JKS bundle: %w", err)
 		}
 		// always overwrite the keystore entry
-		secret.Data[jksSecretKey] = keystoreData
+		secret.Data[cmapi.JKSSecretKey] = keystoreData
 
 		if len(data.CA) > 0 {
 			truststoreData, err := encodeJKSTruststore(pw, data.CA)
@@ -271,7 +299,7 @@ func (s *SecretsManager) setKeystores(crt *cmapi.Certificate, secret *corev1.Sec
 				return fmt.Errorf("error encoding JKS trust store bundle: %w", err)
 			}
 			// always overwrite the keystore entry
-			secret.Data[jksTruststoreKey] = truststoreData
+			secret.Data[cmapi.JKSTruststoreKey] = truststoreData
 		}
 	}
 

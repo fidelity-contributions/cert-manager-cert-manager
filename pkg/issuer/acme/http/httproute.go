@@ -24,8 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/pointer"
-	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	"k8s.io/utils/ptr"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
@@ -79,7 +79,7 @@ func (s *Solver) getGatewayHTTPRoute(ctx context.Context, ch *cmacme.Challenge) 
 		// If we find this, try to delete them.
 		for _, httpRoute := range httpRoutes[1:] {
 			log.Info("Deleting extra HTTPRoute", "name", httpRoute.Name, "namespace", httpRoute.Namespace)
-			err := s.GWClient.GatewayV1alpha2().HTTPRoutes(httpRoute.Namespace).Delete(ctx, httpRoute.Name, metav1.DeleteOptions{})
+			err := s.GWClient.GatewayV1beta1().HTTPRoutes(httpRoute.Namespace).Delete(ctx, httpRoute.Name, metav1.DeleteOptions{})
 			if err != nil {
 				return nil, err
 			}
@@ -90,10 +90,8 @@ func (s *Solver) getGatewayHTTPRoute(ctx context.Context, ch *cmacme.Challenge) 
 
 func (s *Solver) createGatewayHTTPRoute(ctx context.Context, ch *cmacme.Challenge, svcName string) (*gwapi.HTTPRoute, error) {
 	labels := podLabels(ch)
-	if ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels != nil {
-		for k, v := range ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels {
-			labels[k] = v
-		}
+	for k, v := range ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels {
+		labels[k] = v
 	}
 	httpRoute := &gwapi.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -104,7 +102,7 @@ func (s *Solver) createGatewayHTTPRoute(ctx context.Context, ch *cmacme.Challeng
 		},
 		Spec: generateHTTPRouteSpec(ch, svcName),
 	}
-	newHTTPRoute, err := s.GWClient.GatewayV1alpha2().HTTPRoutes(ch.Namespace).Create(ctx, httpRoute, metav1.CreateOptions{})
+	newHTTPRoute, err := s.GWClient.GatewayV1beta1().HTTPRoutes(ch.Namespace).Create(ctx, httpRoute, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -116,10 +114,8 @@ func (s *Solver) checkAndUpdateGatewayHTTPRoute(ctx context.Context, ch *cmacme.
 	expectedSpec := generateHTTPRouteSpec(ch, svcName)
 	actualSpec := httpRoute.Spec
 	expectedLabels := podLabels(ch)
-	if ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels != nil {
-		for k, v := range ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels {
-			expectedLabels[k] = v
-		}
+	for k, v := range ch.Spec.Solver.HTTP01.GatewayHTTPRoute.Labels {
+		expectedLabels[k] = v
 	}
 	actualLabels := ch.Labels
 	if reflect.DeepEqual(expectedSpec, actualSpec) && reflect.DeepEqual(expectedLabels, actualLabels) {
@@ -129,14 +125,14 @@ func (s *Solver) checkAndUpdateGatewayHTTPRoute(ctx context.Context, ch *cmacme.
 	var ret *gwapi.HTTPRoute
 	var err error
 	if err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		oldHTTPRoute, err := s.GWClient.GatewayV1alpha2().HTTPRoutes(httpRoute.Namespace).Get(ctx, httpRoute.Name, metav1.GetOptions{})
+		oldHTTPRoute, err := s.GWClient.GatewayV1beta1().HTTPRoutes(httpRoute.Namespace).Get(ctx, httpRoute.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
 		newHTTPRoute := oldHTTPRoute.DeepCopy()
 		newHTTPRoute.Spec = expectedSpec
 		newHTTPRoute.Labels = expectedLabels
-		ret, err = s.GWClient.GatewayV1alpha2().HTTPRoutes(newHTTPRoute.Namespace).Update(ctx, newHTTPRoute, metav1.UpdateOptions{})
+		ret, err = s.GWClient.GatewayV1beta1().HTTPRoutes(newHTTPRoute.Namespace).Update(ctx, newHTTPRoute, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
@@ -161,7 +157,7 @@ func generateHTTPRouteSpec(ch *cmacme.Challenge, svcName string) gwapi.HTTPRoute
 					{
 						Path: &gwapi.HTTPPathMatch{
 							Type:  func() *gwapi.PathMatchType { p := gwapi.PathMatchExact; return &p }(),
-							Value: pointer.String(fmt.Sprintf("/.well-known/acme-challenge/%s", ch.Spec.Token)),
+							Value: ptr.To(fmt.Sprintf("/.well-known/acme-challenge/%s", ch.Spec.Token)),
 						},
 					},
 				},
@@ -174,7 +170,7 @@ func generateHTTPRouteSpec(ch *cmacme.Challenge, svcName string) gwapi.HTTPRoute
 								Namespace: func() *gwapi.Namespace { n := gwapi.Namespace(ch.Namespace); return &n }(),
 								Port:      func() *gwapi.PortNumber { p := gwapi.PortNumber(acmeSolverListenPort); return &p }(),
 							},
-							Weight: pointer.Int32(1),
+							Weight: ptr.To(int32(1)),
 						},
 					},
 				},

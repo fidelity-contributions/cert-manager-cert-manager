@@ -21,140 +21,171 @@ import (
 	"fmt"
 	"os"
 
-	logf "github.com/cert-manager/cert-manager/pkg/logs"
-	"golang.org/x/sync/errgroup"
 	admissionreg "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/cluster"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
 )
 
-// injectorSet describes a particular setup of the injector controller
-type injectorSetup struct {
+// this file contains the logic to set up the different reconcile loops run by cainjector
+// each reconciler corresponds to a type of injectable
+
+const (
+	MutatingWebhookConfigurationName   = "mutatingwebhookconfiguration"
+	ValidatingWebhookConfigurationName = "validatingwebhookconfiguration"
+	APIServiceName                     = "apiservice"
+	CustomResourceDefinitionName       = "customresourcedefinition"
+)
+
+// setup is setup for a reconciler for a particular injectable type
+type setup struct {
 	resourceName string
-	injector     CertInjector
-	listType     runtime.Object
+	// newInjectableTarget knows how to create an an InjectableTarget for a particular injectable type
+	newInjectableTarget NewInjectableTarget
+	listType            runtime.Object
+	objType             client.Object
+}
+
+type SetupOptions struct {
+	Namespace                    string
+	EnableCertificatesDataSource bool
+	EnabledReconcilersFor        map[string]bool
 }
 
 var (
-	MutatingWebhookSetup = injectorSetup{
-		resourceName: "mutatingwebhookconfiguration",
-		injector:     mutatingWebhookInjector{},
-		listType:     &admissionreg.MutatingWebhookConfigurationList{},
+	MutatingWebhookSetup = setup{
+		resourceName:        "mutatingwebhookconfiguration",
+		newInjectableTarget: newMutatingWebhookInjectable,
+		listType:            &admissionreg.MutatingWebhookConfigurationList{},
+		objType:             &admissionreg.MutatingWebhookConfiguration{},
 	}
 
-	ValidatingWebhookSetup = injectorSetup{
-		resourceName: "validatingwebhookconfiguration",
-		injector:     validatingWebhookInjector{},
-		listType:     &admissionreg.ValidatingWebhookConfigurationList{},
+	ValidatingWebhookSetup = setup{
+		resourceName:        "validatingwebhookconfiguration",
+		newInjectableTarget: newValidatingWebhookInjectable,
+		listType:            &admissionreg.ValidatingWebhookConfigurationList{},
+		objType:             &admissionreg.ValidatingWebhookConfiguration{},
 	}
 
-	APIServiceSetup = injectorSetup{
-		resourceName: "apiservice",
-		injector:     apiServiceInjector{},
-		listType:     &apireg.APIServiceList{},
+	APIServiceSetup = setup{
+		resourceName:        "apiservice",
+		newInjectableTarget: newAPIServiceInjectable,
+		listType:            &apireg.APIServiceList{},
+		objType:             &apireg.APIService{},
 	}
 
-	CRDSetup = injectorSetup{
-		resourceName: "customresourcedefinition",
-		injector:     crdConversionInjector{},
-		listType:     &apiext.CustomResourceDefinitionList{},
+	CRDSetup = setup{
+		resourceName:        "customresourcedefinition",
+		newInjectableTarget: newCRDConversionInjectable,
+		listType:            &apiext.CustomResourceDefinitionList{},
+		objType:             &apiext.CustomResourceDefinition{},
 	}
-
-	injectorSetups  = []injectorSetup{MutatingWebhookSetup, ValidatingWebhookSetup, APIServiceSetup, CRDSetup}
-	ControllerNames []string
 )
 
-// registerAllInjectors registers all injectors and based on the
-// graduation state of the injector decides how to log no kind/resource match errors
-func registerAllInjectors(ctx context.Context, groupName string, mgr ctrl.Manager, sources []caDataSource, client client.Client, ca cache.Cache) error {
-	controllers := make([]controller.Controller, len(injectorSetups))
-	for i, setup := range injectorSetups {
-		controller, err := newGenericInjectionController(ctx, groupName, mgr, setup, sources, ca, client)
-		if err != nil {
-			if !meta.IsNoMatchError(err) || !setup.injector.IsAlpha() {
-				return err
-			}
-			ctrl.Log.V(logf.WarnLevel).Info("unable to register injector which is still in an alpha phase."+
-				" Enable the feature on the API server in order to use this injector",
-				"injector", setup.resourceName)
-		}
-		controllers[i] = controller
+// RegisterAllInjectors sets up watches for all injectable and injector types that cainjector should watch
+func RegisterAllInjectors(ctx context.Context, mgr ctrl.Manager, opts SetupOptions) error {
+	sds := &secretDataSource{
+		client: mgr.GetClient(),
 	}
-	g, gctx := errgroup.WithContext(ctx)
+	cds := &certificateDataSource{
+		client: mgr.GetClient(),
+	}
+	cfg := mgr.GetConfig()
+	caBundle, err := dataFromSliceOrFile(cfg.CAData, cfg.CAFile)
+	if err != nil {
+		return err
+	}
+	kds := &kubeconfigDataSource{
+		apiserverCABundle: caBundle,
+	}
+	injectorSetups := []setup{MutatingWebhookSetup, ValidatingWebhookSetup, APIServiceSetup, CRDSetup}
+	// Registers a c/r controller for each of APIService, CustomResourceDefinition, Mutating/ValidatingWebhookConfiguration
+	for _, setup := range injectorSetups {
+		log := ctrl.Log.WithValues("kind", setup.resourceName)
+		if !opts.EnabledReconcilersFor[setup.resourceName] {
+			log.Info("Not registering a reconcile for injectable kind as it's disabled")
+			continue
+		}
+		log.Info("Registering a reconciler for injectable")
+		r := &reconciler{
+			namespace:           opts.Namespace,
+			resourceName:        setup.resourceName,
+			newInjectableTarget: setup.newInjectableTarget,
+			log:                 log,
+			Client:              mgr.GetClient(),
+			// TODO: refactor
+			sources: []caDataSource{
+				sds,
+				cds,
+				kds,
+			},
+			fieldManager: util.PrefixFromUserAgent(mgr.GetConfig().UserAgent),
+		}
 
-	g.Go(func() (err error) {
-		if err = ca.Start(gctx); err != nil {
+		// Index injectable with a new field. If the injectable's CA is
+		// to be sourced from a Secret, the field's value will be the
+		// namespaced name of the Secret.
+		// This field can then be used as a field selector when listing injectables of this type.
+		secretTyp := setup.newInjectableTarget().AsObject()
+		if err := mgr.GetFieldIndexer().IndexField(ctx, secretTyp, injectFromSecretPath, injectableCAFromSecretIndexer); err != nil {
+			err := fmt.Errorf("error making injectable indexable by inject-ca-from-secret annotation: %w", err)
 			return err
 		}
-		return nil
-	})
-	if ca.WaitForCacheSync(gctx) {
-		for _, controller := range controllers {
-			if gctx.Err() != nil {
-				break
-			}
-			controller := controller
-			g.Go(func() (err error) {
-				return controller.Start(gctx)
-			})
-		}
-	} else {
-		// I assume that if the cache sync fails, then the already-started cache
-		// will exit with a meaningful error which will be returned by the errgroup
-		ctrl.Log.Error(nil, "timed out or failed while waiting for cache")
-	}
-	return g.Wait()
-}
-
-// newGenericInjectionController creates a controller and adds relevant watches
-// and indexers to the supplied cache.
-// TODO: We can't use the controller-runtime controller.Builder mechanism here
-// because it doesn't allow us to specify the cache to which we link watches,
-// indexes and event sources. Keep checking new controller-runtime releases for
-// improvements which might make this easier:
-// * https://github.com/kubernetes-sigs/controller-runtime/issues/764
-func newGenericInjectionController(ctx context.Context, groupName string, mgr ctrl.Manager,
-	setup injectorSetup, sources []caDataSource, ca cache.Cache,
-	client client.Client) (controller.Controller, error) {
-	log := ctrl.Log.WithName(groupName).WithName(setup.resourceName)
-	typ := setup.injector.NewTarget().AsObject()
-
-	c, err := controller.NewUnmanaged(
-		fmt.Sprintf("controller-for-%s-%s", groupName, setup.resourceName),
-		mgr,
-		controller.Options{
-			Reconciler: &genericInjectReconciler{
-				Client:       client,
-				sources:      sources,
-				log:          log.WithName("generic-inject-reconciler"),
-				resourceName: setup.resourceName,
-				injector:     setup.injector,
+		predicates := predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return hasInjectableAnnotation(e.ObjectNew)
 			},
-			Log: log,
-		})
-	if err != nil {
-		return nil, err
-	}
-	if err := c.Watch(source.NewKindWithCache(typ, ca), &handler.EnqueueRequestForObject{}); err != nil {
-		return nil, err
-	}
+			CreateFunc: func(e event.CreateEvent) bool {
+				return hasInjectableAnnotation(e.Object)
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return hasInjectableAnnotation(e.Object)
+			},
+		}
 
-	for _, s := range sources {
-		if err := s.ApplyTo(ctx, mgr, setup, c, ca); err != nil {
-			return nil, err
+		b := ctrl.NewControllerManagedBy(mgr).
+			For(setup.objType,
+				// We watch all CRDs,
+				// Validating/MutatingWebhookConfigurations,
+				// APIServices because the only way how to tell
+				// if an object is an injectable is from
+				// annotation value and this cannot be used to
+				// filter List/Watch. The earliest point where
+				// we can use the annotation to filter
+				// injectables is here where we define which
+				// objects' events should trigger a reconcile.
+				builder.WithPredicates(predicates)).
+			Watches(new(corev1.Secret), handler.EnqueueRequestsFromMapFunc(secretForInjectableMapFuncBuilder(mgr.GetClient(), log, setup)))
+		if opts.EnableCertificatesDataSource {
+			// Index injectable with a new field. If the injectable's CA is
+			// to be sourced from a Certificate's Secret, the field's value will be the
+			// namespaced name of the Certificate.
+			// This field can then be used as a field selector when listing injectables of this type.
+			certTyp := setup.newInjectableTarget().AsObject()
+			if err := mgr.GetFieldIndexer().IndexField(ctx, certTyp, injectFromPath, injectableCAFromIndexer); err != nil {
+				err := fmt.Errorf("error making injectable indexable by inject-ca-from path: %w", err)
+				return err
+			}
+			b.Watches(new(corev1.Secret), handler.EnqueueRequestsFromMapFunc(
+				certFromSecretToInjectableMapFuncBuilder(mgr.GetClient(), log, setup))).
+				Watches(new(cmapi.Certificate),
+					handler.EnqueueRequestsFromMapFunc(certToInjectableMapFuncBuilder(mgr.GetClient(), log, setup)))
+		}
+		if err := b.Complete(r); err != nil {
+			return fmt.Errorf("error registering controller for %s: %w", setup.objType.GetName(), err)
 		}
 	}
-
-	return c, nil
+	return nil
 }
 
 // dataFromSliceOrFile returns data from the slice (if non-empty), or from the file,
@@ -171,77 +202,4 @@ func dataFromSliceOrFile(data []byte, file string) ([]byte, error) {
 		return fileData, nil
 	}
 	return nil, nil
-}
-
-// RegisterCertificateBased registers all known injection controllers that
-// target Certificate resources with the  given manager, and adds relevant
-// indices.
-// The registered controllers require the cert-manager API to be available
-// in order to run.
-func RegisterCertificateBased(ctx context.Context, mgr ctrl.Manager) error {
-	cache, client, err := newIndependentCacheAndDelegatingClient(mgr)
-	if err != nil {
-		return err
-	}
-	return registerAllInjectors(
-		ctx,
-		"certificate",
-		mgr,
-		[]caDataSource{
-			&certificateDataSource{client: cache},
-		},
-		client,
-		cache,
-	)
-}
-
-// RegisterSecretBased registers all known injection controllers that
-// target Secret resources with the  given manager, and adds relevant
-// indices.
-// The registered controllers only require the corev1 APi to be available in
-// order to run.
-func RegisterSecretBased(ctx context.Context, mgr ctrl.Manager) error {
-	cache, client, err := newIndependentCacheAndDelegatingClient(mgr)
-	if err != nil {
-		return err
-	}
-	return registerAllInjectors(
-		ctx,
-		"secret",
-		mgr,
-		[]caDataSource{
-			&secretDataSource{client: cache},
-			&kubeconfigDataSource{},
-		},
-		client,
-		cache,
-	)
-}
-
-// newIndependentCacheAndDelegatingClient creates a cache and a delegating
-// client which are independent of the cache of the manager.
-// This allows us to start the manager and secrets based injectors before the
-// cert-manager Certificates CRDs have been installed and before the CA bundles
-// have been injected into the cert-manager CRDs, by the secrets based injector,
-// which is running in a separate goroutine.
-func newIndependentCacheAndDelegatingClient(mgr ctrl.Manager) (cache.Cache, client.Client, error) {
-	cacheOptions := cache.Options{
-		Scheme: mgr.GetScheme(),
-		Mapper: mgr.GetRESTMapper(),
-	}
-	ca, err := cache.New(mgr.GetConfig(), cacheOptions)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	clientOptions := client.Options{
-		Scheme: mgr.GetScheme(),
-		Mapper: mgr.GetRESTMapper(),
-	}
-
-	client, err := cluster.DefaultNewClient(ca, mgr.GetConfig(), clientOptions)
-	if err != nil {
-		return nil, nil, err
-	}
-	return ca, client, nil
 }

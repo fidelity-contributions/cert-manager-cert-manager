@@ -27,8 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -37,17 +35,18 @@ import (
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
 	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	"github.com/cert-manager/cert-manager/pkg/scheduler"
 	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/pkg/util/predicate"
 )
 
@@ -67,7 +66,7 @@ const (
 type controller struct {
 	certificateLister        cmlisters.CertificateLister
 	certificateRequestLister cmlisters.CertificateRequestLister
-	secretLister             corelisters.SecretLister
+	secretLister             internalinformers.SecretLister
 	client                   cmclient.Interface
 	recorder                 record.EventRecorder
 	scheduledWorkQueue       scheduler.ScheduledWorkQueue
@@ -85,21 +84,16 @@ type controller struct {
 
 func NewController(
 	log logr.Logger,
-	client cmclient.Interface,
-	factory informers.SharedInformerFactory,
-	cmFactory cminformers.SharedInformerFactory,
-	recorder record.EventRecorder,
-	clock clock.Clock,
+	ctx *controllerpkg.Context,
 	shouldReissue policies.Func,
-	fieldManager string,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
 
 	// obtain references to all the informers used by this controller
-	certificateInformer := cmFactory.Certmanager().V1().Certificates()
-	certificateRequestInformer := cmFactory.Certmanager().V1().CertificateRequests()
-	secretsInformer := factory.Core().V1().Secrets()
+	certificateInformer := ctx.SharedInformerFactory.Certmanager().V1().Certificates()
+	certificateRequestInformer := ctx.SharedInformerFactory.Certmanager().V1().CertificateRequests()
+	secretsInformer := ctx.KubeSharedInformerFactory.Secrets()
 
 	certificateInformer.Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{Queue: queue})
 
@@ -126,13 +120,13 @@ func NewController(
 		certificateLister:        certificateInformer.Lister(),
 		certificateRequestLister: certificateRequestInformer.Lister(),
 		secretLister:             secretsInformer.Lister(),
-		client:                   client,
-		recorder:                 recorder,
-		scheduledWorkQueue:       scheduler.NewScheduledWorkQueue(clock, queue.Add),
-		fieldManager:             fieldManager,
+		client:                   ctx.CMClient,
+		recorder:                 ctx.Recorder,
+		scheduledWorkQueue:       scheduler.NewScheduledWorkQueue(ctx.Clock, queue.Add),
+		fieldManager:             ctx.FieldManager,
 
 		// The following are used for testing purposes.
-		clock:         clock,
+		clock:         ctx.Clock,
 		shouldReissue: shouldReissue,
 		dataForCertificate: (&policies.Gatherer{
 			CertificateRequestLister: certificateRequestInformer.Lister(),
@@ -163,6 +157,27 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		Status: cmmeta.ConditionTrue,
 	}) {
 		// Do nothing if an issuance is already in progress.
+		return nil
+	}
+
+	// It is possible for multiple Certificates to reference the same Secret. In that case, without this check,
+	// the duplicate Certificates would each be issued and store their version of the X.509 certificate in the
+	// target Secret, triggering the re-issuance of the other Certificate resources who's spec no longer matches
+	// what is in the Secret. This would cause a flood of re-issuance attempts and overloads the Kubernetes API
+	// and the API server of the issuing CA.
+	isOwner, duplicates, err := internalcertificates.CertificateOwnsSecret(ctx, c.certificateLister, c.secretLister, crt)
+	if err != nil {
+		return err
+	}
+	if !isOwner {
+		log.V(logf.DebugLevel).Info("Certificate.Spec.SecretName refers to the same Secret as other Certificates in the same namespace, skipping trigger.", "duplicates", duplicates)
+
+		// If the Certificate is not the owner of the Secret, we requeue the Certificate and wait for the
+		// Certificate to become the owner of the Secret. This can happen if the Certificate is updated to
+		// reference a different Secret, or if the conflicting Certificate is deleted or updated to no longer
+		// reference the Secret.
+		c.scheduledWorkQueue.Add(key, 3*time.Minute)
+
 		return nil
 	}
 
@@ -258,7 +273,7 @@ func shouldBackoffReissuingOnFailure(log logr.Logger, c clock.Clock, crt *cmapi.
 	if nextCR == nil {
 		log.V(logf.InfoLevel).Info("next CertificateRequest not available, skipping checking if Certificate matches the CertificateRequest")
 	} else {
-		mismatches, err := certificates.RequestMatchesSpec(nextCR, crt.Spec)
+		mismatches, err := pki.RequestMatchesSpec(nextCR, crt.Spec)
 		if err != nil {
 			log.V(logf.InfoLevel).Info("next CertificateRequest cannot be decoded, skipping checking if Certificate matches the CertificateRequest")
 			return false, 0
@@ -339,13 +354,8 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 	log := logf.FromContext(ctx.RootContext, ControllerName)
 
 	ctrl, queue, mustSync := NewController(log,
-		ctx.CMClient,
-		ctx.KubeSharedInformerFactory,
-		ctx.SharedInformerFactory,
-		ctx.Recorder,
-		ctx.Clock,
+		ctx,
 		policies.NewTriggerPolicyChain(ctx.Clock).Evaluate,
-		ctx.FieldManager,
 	)
 	c.controller = ctrl
 

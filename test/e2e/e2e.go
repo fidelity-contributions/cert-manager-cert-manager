@@ -17,68 +17,101 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/json"
 	"os"
 	"path"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/addon"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/addon"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
 )
 
-var (
-	cfg = framework.DefaultConfig
-)
+var cfg = framework.DefaultConfig
+
+// isGinkgoProcessNumberOne is true if this is the first ginkgo process to run.
+// Only the first ginkgo process will run the global addon Setup, Provision &
+// Deprovision code.
+// All other ginkgo processes will only run the global addon Setup code using
+// the data transferred from the Setup function on the first ginkgo process.
+var isGinkgoProcessNumberOne = false
 
 var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	addon.InitGlobals(cfg)
 
-	err := addon.ProvisionGlobals(cfg)
+	isGinkgoProcessNumberOne = true
+
+	// We first setup the global addons, but do not provision them yet.
+	// This is because we need to transfer the data from ginkgo process #1
+	// to the other ginkgo processes.
+	toBeTransferred, err := addon.SetupGlobalsPrimary(cfg)
 	if err != nil {
 		framework.Failf("Error provisioning global addons: %v", err)
 	}
 
-	return nil
-}, func([]byte) {
-	addon.InitGlobals(cfg)
-
-	err := addon.SetupGlobals(cfg)
+	encodedData, err := json.Marshal(toBeTransferred)
 	if err != nil {
-		framework.Failf("Error configuring global addons: %v", err)
+		framework.Failf("Error encoding global addon data: %v", err)
+	}
+
+	return encodedData
+}, func(encodedData []byte) {
+	transferredData := []addon.AddonTransferableData{}
+	err := json.Unmarshal(encodedData, &transferredData)
+	if err != nil {
+		framework.Failf("Error decoding global addon data: %v", err)
+	}
+
+	if isGinkgoProcessNumberOne {
+		// For ginkgo process #1, we need to run ProvisionGlobals to
+		// actually provision the global addons.
+		err = addon.ProvisionGlobals(cfg)
+		if err != nil {
+			framework.Failf("Error configuring global addons: %v", err)
+		}
+	} else {
+		// For gingko process #2 and above, we need to run Setup with
+		// the Setup data returned by ginkgo process #1.
+		addon.InitGlobals(cfg)
+
+		err := addon.SetupGlobalsNonPrimary(cfg, transferredData)
+		if err != nil {
+			framework.Failf("Error provisioning global addons: %v", err)
+		}
 	}
 })
 
-var globalLogs map[string]string
+var _ = ginkgo.SynchronizedAfterSuite(func() {
+	// Reset the isGinkgoProcessNumberOne flag to false for the next run (when --repeat flag is used)
+	isGinkgoProcessNumberOne = false
+}, func() {
+	ginkgo.By("Retrieving logs for global addons")
+	globalLogs, err := addon.GlobalLogs()
+	if err != nil {
+		log.Logf("Failed to retrieve global addon logs: " + err.Error())
+	}
 
-var _ = ginkgo.SynchronizedAfterSuite(func() {},
-	func() {
-		ginkgo.By("Retrieving logs for global addons")
-		var err error
-		globalLogs, err = addon.GlobalLogs()
+	for k, v := range globalLogs {
+		outPath := path.Join(cfg.Ginkgo.ReportDirectory, "logs", k)
+
+		// Create a directory for the file if needed
+		err := os.MkdirAll(path.Dir(outPath), 0755)
 		if err != nil {
-			log.Logf("Failed to retrieve global addon logs: " + err.Error())
+			log.Logf("Failed to create directory for logs: %v", err)
+			continue
 		}
 
-		for k, v := range globalLogs {
-			outPath := path.Join(framework.DefaultConfig.Ginkgo.ReportDirectory, "logs", k)
-			// Create a directory for the file if needed
-			err := os.MkdirAll(path.Dir(outPath), 0755)
-			if err != nil {
-				log.Logf("Failed to create directory for logs: %v", err)
-				continue
-			}
-
-			err = os.WriteFile(outPath, []byte(v), 0644)
-			if err != nil {
-				log.Logf("Failed to write log file: %v", err)
-				continue
-			}
-		}
-
-		ginkgo.By("Cleaning up the provisioned globals")
-		err = addon.DeprovisionGlobals(cfg)
+		err = os.WriteFile(outPath, []byte(v), 0644)
 		if err != nil {
-			framework.Failf("Error deprovisioning global addons: %v", err)
+			log.Logf("Failed to write log file: %v", err)
+			continue
 		}
-	})
+	}
+
+	ginkgo.By("Cleaning up the provisioned globals")
+	err = addon.DeprovisionGlobals(cfg)
+	if err != nil {
+		framework.Failf("Error deprovisioning global addons: %v", err)
+	}
+})

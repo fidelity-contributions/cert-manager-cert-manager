@@ -29,12 +29,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 // WaitForCertificateRequestReady waits for the CertificateRequest resource to
@@ -43,25 +43,23 @@ func (h *Helper) WaitForCertificateRequestReady(ns, name string, timeout time.Du
 	var cr *cmapi.CertificateRequest
 	logf, done := log.LogBackoff()
 	defer done()
-	err := wait.PollImmediate(time.Second, timeout,
-		func() (bool, error) {
-			var err error
-			logf("Waiting for CertificateRequest %s to be ready", name)
-			cr, err = h.CMClient.CertmanagerV1().CertificateRequests(ns).Get(context.TODO(), name, metav1.GetOptions{})
-			if err != nil {
-				return false, fmt.Errorf("error getting CertificateRequest %s: %v", name, err)
-			}
-			isReady := apiutil.CertificateRequestHasCondition(cr, cmapi.CertificateRequestCondition{
-				Type:   cmapi.CertificateRequestConditionReady,
-				Status: cmmeta.ConditionTrue,
-			})
-			if !isReady {
-				logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
-				return false, nil
-			}
-			return true, nil
-		},
-	)
+	err := wait.PollUntilContextTimeout(context.TODO(), time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var err error
+		logf("Waiting for CertificateRequest %s to be ready", name)
+		cr, err = h.CMClient.CertmanagerV1().CertificateRequests(ns).Get(context.TODO(), name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("error getting CertificateRequest %s: %v", name, err)
+		}
+		isReady := apiutil.CertificateRequestHasCondition(cr, cmapi.CertificateRequestCondition{
+			Type:   cmapi.CertificateRequestConditionReady,
+			Status: cmmeta.ConditionTrue,
+		})
+		if !isReady {
+			logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
+			return false, nil
+		}
+		return true, nil
+	})
 
 	if err != nil {
 		return nil, err
@@ -139,7 +137,7 @@ func (h *Helper) ValidateIssuedCertificateRequest(cr *cmapi.CertificateRequest, 
 		expectedDNSName = expectedDNSNames[0]
 	}
 
-	certificateKeyUsages, certificateExtKeyUsages, err := pki.BuildKeyUsages(cr.Spec.Usages, cr.Spec.IsCA)
+	certificateKeyUsages, certificateExtKeyUsages, err := pki.KeyUsagesForCertificateOrCertificateRequest(cr.Spec.Usages, cr.Spec.IsCA)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build key usages from certificate: %s", err)
 	}

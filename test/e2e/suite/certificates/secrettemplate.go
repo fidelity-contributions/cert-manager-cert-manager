@@ -22,18 +22,18 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	e2eutil "github.com/cert-manager/cert-manager/e2e-tests/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 )
@@ -323,13 +323,13 @@ var _ = framework.CertManagerDescribe("Certificate SecretTemplate", func() {
 				}
 
 				metadata := fieldset.Children.Descend(fieldpath.PathElement{
-					FieldName: pointer.String("metadata"),
+					FieldName: ptr.To("metadata"),
 				})
 				labels := metadata.Children.Descend(fieldpath.PathElement{
-					FieldName: pointer.String("labels"),
+					FieldName: ptr.To("labels"),
 				})
 				annotations := metadata.Children.Descend(fieldpath.PathElement{
-					FieldName: pointer.String("annotations"),
+					FieldName: ptr.To("annotations"),
 				})
 
 				labels.Iterate(func(path fieldpath.Path) {

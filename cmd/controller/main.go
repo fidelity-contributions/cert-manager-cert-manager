@@ -19,8 +19,9 @@ package main
 import (
 	"flag"
 
-	"github.com/cert-manager/cert-manager/cmd/controller/app"
-	"github.com/cert-manager/cert-manager/cmd/util"
+	"github.com/cert-manager/cert-manager/controller-binary/app"
+
+	"github.com/cert-manager/cert-manager/internal/cmd/util"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
@@ -28,15 +29,14 @@ func main() {
 	stopCh, exit := util.SetupExitHandler(util.GracefulShutdown)
 	defer exit() // This function might call os.Exit, so defer last
 
-	logf.InitLogs(flag.CommandLine)
+	logf.InitLogs()
 	defer logf.FlushLogs()
 
-	cmd := app.NewCommandStartCertManagerController(stopCh)
+	cmd := app.NewServerCommand(stopCh)
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 
-	flag.CommandLine.Parse([]string{})
 	if err := cmd.Execute(); err != nil {
-		logf.Log.Error(err, "error while executing")
+		logf.Log.Error(err, "error executing command")
 		util.SetExitCode(err)
 	}
 }

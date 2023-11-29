@@ -26,19 +26,17 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
 	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
@@ -60,13 +58,13 @@ type controller struct {
 	policyChain              policies.Chain
 	certificateLister        cmlisters.CertificateLister
 	certificateRequestLister cmlisters.CertificateRequestLister
-	secretLister             corelisters.SecretLister
+	secretLister             internalinformers.SecretLister
 	client                   cmclient.Interface
 	gatherer                 *policies.Gatherer
 	// policyEvaluator builds Ready condition of a Certificate based on policy evaluation
 	policyEvaluator policyEvaluatorFunc
 	// renewalTimeCalculator calculates renewal time of a certificate
-	renewalTimeCalculator certificates.RenewalTimeFunc
+	renewalTimeCalculator pki.RenewalTimeFunc
 
 	// fieldManager is the string which will be used as the Field Manager on
 	// fields created or edited by the cert-manager Kubernetes client during
@@ -80,21 +78,18 @@ type policyEvaluatorFunc func(policies.Chain, policies.Input) cmapi.CertificateC
 // NewController returns a new certificate readiness controller.
 func NewController(
 	log logr.Logger,
-	client cmclient.Interface,
-	factory informers.SharedInformerFactory,
-	cmFactory cminformers.SharedInformerFactory,
+	ctx *controllerpkg.Context,
 	chain policies.Chain,
-	renewalTimeCalculator certificates.RenewalTimeFunc,
+	renewalTimeCalculator pki.RenewalTimeFunc,
 	policyEvaluator policyEvaluatorFunc,
-	fieldManager string,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
 
 	// obtain references to all the informers used by this controller
-	certificateInformer := cmFactory.Certmanager().V1().Certificates()
-	certificateRequestInformer := cmFactory.Certmanager().V1().CertificateRequests()
-	secretsInformer := factory.Core().V1().Secrets()
+	certificateInformer := ctx.SharedInformerFactory.Certmanager().V1().Certificates()
+	certificateRequestInformer := ctx.SharedInformerFactory.Certmanager().V1().CertificateRequests()
+	secretsInformer := ctx.KubeSharedInformerFactory.Secrets()
 
 	certificateInformer.Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{Queue: queue})
 
@@ -122,14 +117,14 @@ func NewController(
 		certificateLister:        certificateInformer.Lister(),
 		certificateRequestLister: certificateRequestInformer.Lister(),
 		secretLister:             secretsInformer.Lister(),
-		client:                   client,
+		client:                   ctx.CMClient,
 		gatherer: &policies.Gatherer{
 			CertificateRequestLister: certificateRequestInformer.Lister(),
 			SecretLister:             secretsInformer.Lister(),
 		},
 		policyEvaluator:       policyEvaluator,
 		renewalTimeCalculator: renewalTimeCalculator,
-		fieldManager:          fieldManager,
+		fieldManager:          ctx.FieldManager,
 	}, queue, mustSync
 }
 
@@ -225,8 +220,8 @@ func (c *controller) updateOrApplyStatus(ctx context.Context, crt *cmapi.Certifi
 	}
 }
 
-// policyEvaluator builds Certificate's Ready condition using the result of policy chain evaluation
-func policyEvaluator(chain policies.Chain, input policies.Input) cmapi.CertificateCondition {
+// BuildReadyConditionFromChain builds Certificate's Ready condition using the result of policy chain evaluation
+func BuildReadyConditionFromChain(chain policies.Chain, input policies.Input) cmapi.CertificateCondition {
 	reason, message, violationsFound := chain.Evaluate(input)
 	if !violationsFound {
 		return cmapi.CertificateCondition{
@@ -255,13 +250,10 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 	log := logf.FromContext(ctx.RootContext, ControllerName)
 
 	ctrl, queue, mustSync := NewController(log,
-		ctx.CMClient,
-		ctx.KubeSharedInformerFactory,
-		ctx.SharedInformerFactory,
+		ctx,
 		policies.NewReadinessPolicyChain(ctx.Clock),
-		certificates.RenewalTime,
-		policyEvaluator,
-		ctx.FieldManager,
+		pki.RenewalTime,
+		BuildReadyConditionFromChain,
 	)
 	c.controller = ctrl
 

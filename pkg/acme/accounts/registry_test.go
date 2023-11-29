@@ -17,6 +17,9 @@ limitations under the License.
 package accounts
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"net/http"
 	"testing"
 
@@ -143,5 +146,38 @@ func TestRegistry_AddClient_UpdatesExistingWhenPrivateKeyChanges(t *testing.T) {
 	l = r.ListClients()
 	if len(l) != 1 {
 		t.Errorf("expected ListClients to have 1 item but it has %d", len(l))
+	}
+}
+
+func TestRegistry_AddClient_UpdatesClientPKChecksum(t *testing.T) {
+	r := NewDefaultRegistry()
+	pk, err := pki.GenerateRSAPrivateKey(2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk2, err := pki.GenerateRSAPrivateKey(2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pkBytes := x509.MarshalPKCS1PrivateKey(pk)
+	pkChecksum := sha256.Sum256(pkBytes)
+	pkChecksumString := base64.StdEncoding.EncodeToString(pkChecksum[:])
+
+	// Register a new client
+	r.AddClient(http.DefaultClient, "abc", cmacme.ACMEIssuer{}, pk, "cert-manager-test")
+	l := r.ListClients()
+	if len(l) != 1 {
+		t.Errorf("expected ListClients to have 1 item but it has %d", len(l))
+	}
+
+	isCached := r.IsKeyCheckSumCached(pkChecksumString, pk)
+	if isCached == false {
+		t.Fatal("checksum failed for same key")
+	}
+
+	isCached = r.IsKeyCheckSumCached(pkChecksumString, pk2)
+	if isCached == true {
+		t.Fatal("checksum reported same for different keys")
 	}
 }

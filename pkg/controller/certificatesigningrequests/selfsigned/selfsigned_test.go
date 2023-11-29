@@ -19,10 +19,7 @@ package selfsigned
 import (
 	"context"
 	"crypto"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"math"
 	"testing"
@@ -69,18 +66,10 @@ func mustCryptoBundle(t *testing.T) cryptoBundle {
 		t.Fatal(err)
 	}
 
-	template := x509.CertificateRequest{
-		Subject: pkix.Name{
-			CommonName: "test",
-		},
-		SignatureAlgorithm: x509.ECDSAWithSHA256,
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, key)
+	csrPEM, err := gen.CSRWithSigner(key, gen.SetCSRCommonName("test"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	keyPEM, err := pki.EncodePKCS8PrivateKey(key)
 	if err != nil {
@@ -218,7 +207,7 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
-		"an approved CSR but the private key references a Secret that does not exist should mark as failed": {
+		"an approved CSR but the private key references a Secret that does not exist should fire an event and return error": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
 					Type:   certificatesv1.CertificateApproved,
@@ -258,32 +247,11 @@ func TestProcessItem(t *testing.T) {
 							},
 						},
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						certificatesv1.SchemeGroupVersion.WithResource("certificatesigningrequests"),
-						"status",
-						"",
-						gen.CertificateSigningRequestFrom(baseCSR.DeepCopy(),
-							gen.AddCertificateSigningRequestAnnotations(map[string]string{
-								"experimental.cert-manager.io/private-key-secret-name": "test-secret",
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:   certificatesv1.CertificateApproved,
-								Status: corev1.ConditionTrue,
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:               certificatesv1.CertificateFailed,
-								Status:             corev1.ConditionTrue,
-								Reason:             "SecretNotFound",
-								Message:            `Referenced Secret default-unit-test-ns/test-secret not found`,
-								LastTransitionTime: metaFixedClockStart,
-								LastUpdateTime:     metaFixedClockStart,
-							}),
-						),
-					)),
 				},
 			},
+			expectedErr: false,
 		},
-		"an approved CSR but the private key references a Secret that contains bad data should be marked as failed": {
+		"an approved CSR but the private key references a Secret that contains bad data should fire warning event.": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
 					Type:   certificatesv1.CertificateApproved,
@@ -334,28 +302,6 @@ func TestProcessItem(t *testing.T) {
 							},
 						},
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						certificatesv1.SchemeGroupVersion.WithResource("certificatesigningrequests"),
-						"status",
-						"",
-						gen.CertificateSigningRequestFrom(baseCSR.DeepCopy(),
-							gen.AddCertificateSigningRequestAnnotations(map[string]string{
-								"experimental.cert-manager.io/private-key-secret-name": "test-secret",
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:   certificatesv1.CertificateApproved,
-								Status: corev1.ConditionTrue,
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:               certificatesv1.CertificateFailed,
-								Status:             corev1.ConditionTrue,
-								Reason:             "ErrorParsingKey",
-								Message:            "Failed to parse signing key from secret default-unit-test-ns/test-secret",
-								LastTransitionTime: metaFixedClockStart,
-								LastUpdateTime:     metaFixedClockStart,
-							}),
-						),
-					)),
 				},
 			},
 		},
@@ -374,7 +320,7 @@ func TestProcessItem(t *testing.T) {
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				KubeObjects:        []runtime.Object{csrBundle.secret},
 				ExpectedEvents: []string{
-					"Warning ErrorGenerating Error generating certificate template: failed to decode csr",
+					"Warning ErrorGenerating Error generating certificate template: error decoding certificate request PEM block",
 				},
 
 				ExpectedActions: []testpkg.Action{
@@ -418,7 +364,7 @@ func TestProcessItem(t *testing.T) {
 								Type:               certificatesv1.CertificateFailed,
 								Status:             corev1.ConditionTrue,
 								Reason:             "ErrorGenerating",
-								Message:            "Error generating certificate template: failed to decode csr",
+								Message:            "Error generating certificate template: error decoding certificate request PEM block",
 								LastTransitionTime: metaFixedClockStart,
 								LastUpdateTime:     metaFixedClockStart,
 							}),

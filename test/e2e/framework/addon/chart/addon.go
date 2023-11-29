@@ -17,6 +17,7 @@ limitations under the License.
 package chart
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -27,8 +28,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cert-manager/cert-manager/test/e2e/framework/addon/base"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/config"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/addon/base"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/addon/internal"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/config"
 )
 
 // Chart is a generic Helm chart addon for the test environment
@@ -68,6 +70,19 @@ type Chart struct {
 	// before installing.
 	// This should only be set to true when the ChartName is a local path on disk.
 	UpdateDeps bool
+
+	// repository source of this Chart
+	Repo Repo
+}
+
+var _ internal.Addon = &Chart{}
+
+type Repo struct {
+	// name of the repository
+	Name string
+
+	// source URL of the repository
+	Url string
 }
 
 // StringTuple is a tuple of strings, used to create ordered maps
@@ -85,24 +100,31 @@ type Details struct {
 	Namespace string
 }
 
-func (c *Chart) Setup(cfg *config.Config) error {
+func (c *Chart) Setup(cfg *config.Config, _ ...internal.AddonTransferableData) (internal.AddonTransferableData, error) {
 	var err error
 
 	c.config = cfg
 	if c.config.Addons.Helm.Path == "" {
-		return fmt.Errorf("--helm-binary-path must be set")
+		return nil, fmt.Errorf("--helm-binary-path must be set")
 	}
 
 	c.home, err = os.MkdirTemp("", "helm-chart-install")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return nil, nil
 }
 
 // Provision an instance of tiller-deploy
 func (c *Chart) Provision() error {
+	if len(c.Repo.Name) > 0 && len(c.Repo.Url) > 0 {
+		err := c.addRepo()
+		if err != nil {
+			return fmt.Errorf("error adding helm repo: %v", err)
+		}
+	}
+
 	if c.UpdateDeps {
 		err := c.runDepUpdate()
 		if err != nil {
@@ -113,11 +135,6 @@ func (c *Chart) Provision() error {
 	err := c.runInstall()
 	if err != nil {
 		return fmt.Errorf("error install helm chart: %v", err)
-	}
-
-	err = c.Base.Details().Helper().WaitForAllPodsRunningInNamespace(c.Namespace)
-	if err != nil {
-		return err
 	}
 
 	return nil
@@ -132,9 +149,11 @@ func (c *Chart) runDepUpdate() error {
 }
 
 func (c *Chart) runInstall() error {
-	args := []string{"install", c.ReleaseName, c.ChartName,
+	args := []string{"upgrade", c.ReleaseName, c.ChartName,
+		"--install",
 		"--wait",
 		"--namespace", c.Namespace,
+		"--create-namespace",
 		"--version", c.ChartVersion}
 
 	for _, v := range c.Values {
@@ -146,12 +165,8 @@ func (c *Chart) runInstall() error {
 	}
 
 	cmd := c.buildHelmCmd(args...)
-	err := cmd.Run()
-	if err != nil {
-		return err
-	}
 
-	return nil
+	return cmd.Run()
 }
 
 func (c *Chart) buildHelmCmd(args ...string) *exec.Cmd {
@@ -165,34 +180,21 @@ func (c *Chart) buildHelmCmd(args ...string) *exec.Cmd {
 	return cmd
 }
 
-func (c *Chart) getHelmVersion() (string, error) {
-	cmd := c.buildHelmCmd("version", "--template", "{{.Client.Version}}")
-	cmd.Stdout = nil
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-	defer out.Close()
-
-	err = cmd.Run()
-	if err != nil {
-		return "", err
-	}
-
-	outBytes, err := io.ReadAll(out)
-	if err != nil {
-		return "", err
-	}
-
-	return string(outBytes), nil
-}
-
-// Deprovision the deployed instance of tiller-deploy
+// Deprovision the deployed chart
 func (c *Chart) Deprovision() error {
-	err := c.buildHelmCmd("delete", "--namespace", c.Namespace, c.ReleaseName).Run()
+	cmd := c.buildHelmCmd("delete", "--namespace", c.Namespace, c.ReleaseName)
+	stdoutBuf := &bytes.Buffer{}
+	cmd.Stdout = stdoutBuf
+
+	err := cmd.Run()
 	if err != nil {
+		_, err2 := io.Copy(os.Stdout, stdoutBuf)
+		if err2 != nil {
+			return fmt.Errorf("cmd.Run: %v: io.Copy: %v", err, err2)
+		}
+
 		// Ignore deprovisioning errors
-		// TODO: only ignore failed to delete because it doesn't exist errors
+		// TODO: only ignore "failed to delete because it doesn't exist" errors
 		return nil
 	}
 
@@ -218,11 +220,7 @@ func (c *Chart) SupportsGlobal() bool {
 	// We can't run in global mode if the release name is not set, as there's
 	// no way for us to communicate the generated release name to other test
 	// runners when running in parallel mode.
-	if c.ReleaseName == "" {
-		return false
-	}
-
-	return true
+	return c.ReleaseName != ""
 }
 
 func (c *Chart) Logs() (map[string]string, error) {
@@ -271,4 +269,12 @@ func (c *Chart) Logs() (map[string]string, error) {
 	}
 
 	return out, nil
+}
+
+func (c *Chart) addRepo() error {
+	err := c.buildHelmCmd("repo", "add", c.Repo.Name, c.Repo.Url).Run()
+	if err != nil {
+		return err
+	}
+	return nil
 }

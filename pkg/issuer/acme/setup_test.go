@@ -122,6 +122,9 @@ func TestAcme_Setup(t *testing.T) {
 		// Error returned by cl.GetReg
 		getRegErr error
 
+		// Error return by cl.UpdateRegistration
+		updateRegError error
+
 		// Error returned when creating ACME account key.
 		acmePrivKeySecretCreateErr error
 		// ACME account key created by createAccountPrivateKey.
@@ -250,6 +253,7 @@ func TestAcme_Setup(t *testing.T) {
 				gen.SetIssuerACMEAccountURL(acmev2Prod),
 				gen.SetIssuerACMEEmail(someEmail),
 				gen.SetIssuerACMELastRegisteredEmail(someEmail),
+				gen.SetIssuerACMELastPrivateKeyHash(someString),
 				gen.AddIssuerCondition(
 					*gen.IssuerConditionFrom(readyTrueCondition,
 						gen.SetIssuerConditionStatus(cmmeta.ConditionTrue)))),
@@ -382,6 +386,127 @@ func TestAcme_Setup(t *testing.T) {
 					gen.SetIssuerConditionMessage(messageAccountRegistered)),
 			},
 		},
+		"ACME account with legacy EAB key algorithm set, spec email different from registered email and registered successfully": {
+			issuer: gen.IssuerFrom(baseIssuer,
+				gen.SetIssuerACMEEmail(someEmail),
+				gen.SetIssuerACMEEABWithKeyAlgorithm(someString, someString, cmacme.HS256)),
+			kfsKey:                     rsaPrivKey,
+			removeClientShouldBeCalled: true,
+			addClientShouldBeCalled:    true,
+			eabSecret:                  eabSecret,
+			registerErr:                acmeapi.ErrAccountAlreadyExists,
+			getRegAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{"some@test.com"},
+			},
+			expectedRegisteredAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{someEmailURL},
+			},
+			expectedConditions: []cmapi.IssuerCondition{
+				*gen.IssuerConditionFrom(readyTrueCondition,
+					gen.SetIssuerConditionStatus(cmmeta.ConditionTrue),
+					gen.SetIssuerConditionReason(successAccountRegistered),
+					gen.SetIssuerConditionMessage(messageAccountRegistered)),
+			},
+		},
+		"ACME account with legacy EAB key algorithm set, spec email different from registered email and registered failed": {
+			issuer: gen.IssuerFrom(baseIssuer,
+				gen.SetIssuerACMEEmail(someEmail),
+				gen.SetIssuerACMEEABWithKeyAlgorithm(someString, someString, cmacme.HS256)),
+			kfsKey:                     rsaPrivKey,
+			removeClientShouldBeCalled: true,
+			eabSecret:                  eabSecret,
+			registerErr:                acmeapi.ErrAccountAlreadyExists,
+			getRegAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{"some@test.com"},
+			},
+			expectedRegisteredAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{someEmailURL},
+			},
+			updateRegError: someErr,
+			wantsErr:       true,
+			expectedConditions: []cmapi.IssuerCondition{
+				*gen.IssuerConditionFrom(readyTrueCondition,
+					gen.SetIssuerConditionStatus(cmmeta.ConditionFalse),
+					gen.SetIssuerConditionReason(errorAccountUpdateFailed),
+					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, someString))),
+			},
+			expectedEvents: []string{
+				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, someString))},
+		},
+		"ACME account with legacy EAB key algorithm set, spec email different from registered email and registered failed with non-retryable ACME Error": {
+			issuer: gen.IssuerFrom(baseIssuer,
+				gen.SetIssuerACMEEmail(someEmail),
+				gen.SetIssuerACMEEABWithKeyAlgorithm(someString, someString, cmacme.HS256)),
+			kfsKey:                     rsaPrivKey,
+			removeClientShouldBeCalled: true,
+			eabSecret:                  eabSecret,
+			registerErr:                acmeapi.ErrAccountAlreadyExists,
+			getRegAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{"some@test.com"},
+			},
+			expectedRegisteredAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{someEmailURL},
+			},
+			updateRegError: acmeErr450,
+			wantsErr:       false,
+			expectedConditions: []cmapi.IssuerCondition{
+				*gen.IssuerConditionFrom(readyTrueCondition,
+					gen.SetIssuerConditionStatus(cmmeta.ConditionFalse),
+					gen.SetIssuerConditionReason(errorAccountUpdateFailed),
+					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr450.Error()))),
+			},
+			expectedEvents: []string{
+				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr450.Error()))},
+		},
+		"ACME account with legacy EAB key algorithm set, spec email different from registered email and registered failed with retryable ACME Error": {
+			issuer: gen.IssuerFrom(baseIssuer,
+				gen.SetIssuerACMEEmail(someEmail),
+				gen.SetIssuerACMEEABWithKeyAlgorithm(someString, someString, cmacme.HS256)),
+			kfsKey:                     rsaPrivKey,
+			removeClientShouldBeCalled: true,
+			eabSecret:                  eabSecret,
+			registerErr:                acmeapi.ErrAccountAlreadyExists,
+			getRegAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{"some@test.com"},
+			},
+			expectedRegisteredAcc: &acmeapi.Account{ExternalAccountBinding: &acmeapi.ExternalAccountBinding{
+				KID: someString,
+				Key: []byte(eabKey),
+			},
+				Contact: []string{someEmailURL},
+			},
+			updateRegError: acmeErr500,
+			wantsErr:       true,
+			expectedConditions: []cmapi.IssuerCondition{
+				*gen.IssuerConditionFrom(readyTrueCondition,
+					gen.SetIssuerConditionStatus(cmmeta.ConditionFalse),
+					gen.SetIssuerConditionReason(errorAccountUpdateFailed),
+					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr500.Error()))),
+			},
+			expectedEvents: []string{
+				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr500.Error()))},
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -414,6 +539,9 @@ func TestAcme_Setup(t *testing.T) {
 				AddClientFunc: func(string, cmacme.ACMEIssuer, *rsa.PrivateKey, string) {
 					addClientWasCalled = true
 				},
+				IsKeyCheckSumCachedFunc: func(lastPrivateKeyHash string, privateKey *rsa.PrivateKey) bool {
+					return true
+				},
 			}
 
 			// Mock ACME client.
@@ -425,6 +553,9 @@ func TestAcme_Setup(t *testing.T) {
 				},
 				FakeGetReg: func(context.Context, string) (*acmeapi.Account, error) {
 					return test.getRegAcc, test.getRegErr
+				},
+				FakeUpdateReg: func(ctx context.Context, a *acmeapi.Account) (*acmeapi.Account, error) {
+					return a, test.updateRegError
 				},
 			}
 

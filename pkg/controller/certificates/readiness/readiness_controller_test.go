@@ -30,8 +30,8 @@ import (
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
-	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
 	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	testcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
@@ -44,7 +44,7 @@ func policyEvaluatorBuilder(c cmapi.CertificateCondition) policyEvaluatorFunc {
 }
 
 // renewalTimeBuilder returns a fake renewalTimeFunc for ReadinessController.
-func renewalTimeBuilder(rt *metav1.Time) certificates.RenewalTimeFunc {
+func renewalTimeBuilder(rt *metav1.Time) pki.RenewalTimeFunc {
 	return func(notBefore, notAfter time.Time, cert *metav1.Duration) *metav1.Time {
 		return rt
 	}
@@ -375,7 +375,7 @@ func TestNewReadinessPolicyChain(t *testing.T) {
 					corev1.TLSCertKey:       []byte("test"),
 				})),
 			reason:         policies.InvalidKeyPair,
-			message:        "Issuing certificate as Secret contains an invalid key-pair: tls: failed to find any PEM data in certificate input",
+			message:        "Issuing certificate as Secret contains invalid private key data: error decoding private key PEM block",
 			violationFound: true,
 		},
 		"Certificate not Ready as Secret contains corrupt certificate data": {
@@ -385,8 +385,8 @@ func TestNewReadinessPolicyChain(t *testing.T) {
 					corev1.TLSPrivateKeyKey: privKey,
 					corev1.TLSCertKey:       []byte("test"),
 				})),
-			reason:         policies.InvalidKeyPair,
-			message:        "Issuing certificate as Secret contains an invalid key-pair: tls: failed to find any PEM data in certificate input",
+			reason:         policies.InvalidCertificate,
+			message:        "Issuing certificate as Secret contains an invalid certificate: error decoding certificate PEM block",
 			violationFound: true,
 		},
 		"Certificate not Ready as Secret contains a non-matching key-pair": {
@@ -399,7 +399,7 @@ func TestNewReadinessPolicyChain(t *testing.T) {
 						gen.Certificate("something else", gen.SetCertificateCommonName("example.com"))),
 				})),
 			reason:         policies.InvalidKeyPair,
-			message:        "Issuing certificate as Secret contains an invalid key-pair: tls: private key does not match public key",
+			message:        "Issuing certificate as Secret contains a private key that does not match the certificate",
 			violationFound: true,
 		},
 		"Certificate not Ready when CertificateRequest does not match certificate spec": {
@@ -467,7 +467,11 @@ func TestNewReadinessPolicyChain(t *testing.T) {
 					Name:  "testissuer",
 					Kind:  "IssuerKind",
 					Group: "group.example.com",
-				})),
+				}),
+				gen.SetCertificateRequestCSR(testcrypto.MustGenerateCSRImpl(t, privKey,
+					gen.Certificate("something",
+						gen.SetCertificateCommonName("new.example.com")))),
+			),
 			reason:         policies.Expired,
 			message:        "Certificate expired on Sun, 31 Dec 0000 23:00:00 UTC",
 			violationFound: true,

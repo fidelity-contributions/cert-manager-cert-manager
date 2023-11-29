@@ -32,11 +32,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/upgrade/migrateapiversion"
+	"github.com/cert-manager/cert-manager/integration-tests/framework"
 	"github.com/cert-manager/cert-manager/pkg/webhook/handlers"
 	"github.com/cert-manager/cert-manager/pkg/webhook/handlers/testdata/apis/testgroup/install"
 	v1 "github.com/cert-manager/cert-manager/pkg/webhook/handlers/testdata/apis/testgroup/v1"
 	v2 "github.com/cert-manager/cert-manager/pkg/webhook/handlers/testdata/apis/testgroup/v2"
-	"github.com/cert-manager/cert-manager/test/integration/framework"
 )
 
 // Create a test resource at a given version.
@@ -74,7 +74,8 @@ func newScheme() *runtime.Scheme {
 }
 
 func TestCtlUpgradeMigrate(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	// This test takes about 25 seconds to run. Let's give it enough time.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create the control plane with the TestType conversion handlers registered
@@ -174,7 +175,7 @@ func TestCtlUpgradeMigrate(t *testing.T) {
 }
 
 func TestCtlUpgradeMigrate_FailsIfStorageVersionDoesNotEqualTargetVersion(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create the control plane with the TestType conversion handlers registered
@@ -226,7 +227,7 @@ func TestCtlUpgradeMigrate_FailsIfStorageVersionDoesNotEqualTargetVersion(t *tes
 }
 
 func TestCtlUpgradeMigrate_SkipsMigrationIfNothingToDo(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create the control plane with the TestType conversion handlers registered
@@ -286,7 +287,7 @@ func TestCtlUpgradeMigrate_SkipsMigrationIfNothingToDo(t *testing.T) {
 }
 
 func TestCtlUpgradeMigrate_ForcesMigrationIfSkipStoredVersionCheckIsEnabled(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Create the control plane with the TestType conversion handlers registered

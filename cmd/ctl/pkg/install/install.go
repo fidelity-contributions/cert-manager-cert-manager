@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +28,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/cli/values"
 	"helm.sh/helm/v3/pkg/getter"
@@ -37,6 +37,7 @@ import (
 
 	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
 	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/install/helm"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type InstallOptions struct {
@@ -159,8 +160,7 @@ func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams) *
 // This creates a Helm "release" artifact in a Secret in the target namespace, which contains
 // a record of all the resources installed by Helm (except the CRDs).
 func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, error) {
-	log.SetFlags(0)         // Disable prefixing logs with timestamps.
-	log.SetOutput(o.ErrOut) // Log everything to stderr so dry-run output does not get corrupted.
+	log := logf.FromContext(ctx, "install")
 
 	// Find chart
 	cp, err := o.client.ChartPathOptions.LocateChart(o.ChartName, o.settings)
@@ -180,7 +180,7 @@ func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, erro
 
 	// Console print if chart is deprecated
 	if chart.Metadata.Deprecated {
-		log.Printf("This chart is deprecated")
+		log.Error(fmt.Errorf("chart.Metadata.Deprecated is true"), "This chart is deprecated")
 	}
 
 	// Merge all values flags
@@ -191,19 +191,31 @@ func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, erro
 	}
 
 	// Dryrun template generation (used for rendering the CRDs in /templates)
-	o.client.DryRun = true                  // Do not apply install
-	o.client.ClientOnly = true              // Do not validate against cluster (otherwise double CRDs can cause error)
+	o.client.DryRun = true     // Do not apply install
+	o.client.ClientOnly = true // Do not validate against cluster (otherwise double CRDs can cause error)
+	// Kube version to be used in dry run template generation which does not
+	// talk to kube apiserver. This is to ensure that template generation
+	// does not fail because our Kubernetes minimum version requirement is
+	// higher than that hardcoded in Helm codebase for client-only runs
+	o.client.KubeVersion = &chartutil.KubeVersion{
+		Version: "v999.999.999",
+		Major:   "999",
+		Minor:   "999",
+	}
 	chartValues[installCRDsFlagName] = true // Make sure to render CRDs
 	dryRunResult, err := o.client.Run(chart, chartValues)
 	if err != nil {
 		return nil, err
+
 	}
 
 	if o.DryRun {
 		return dryRunResult, nil
 	}
 
-	if err := o.cfg.Init(o.settings.RESTClientGetter(), o.settings.Namespace(), os.Getenv("HELM_DRIVER"), log.Printf); err != nil {
+	if err := o.cfg.Init(o.settings.RESTClientGetter(), o.settings.Namespace(), os.Getenv("HELM_DRIVER"), func(format string, v ...interface{}) {
+		log.Info(fmt.Sprintf(format, v...))
+	}); err != nil {
 		return nil, err
 	}
 
@@ -239,6 +251,7 @@ func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, erro
 	// Install chart
 	o.client.DryRun = false     // Apply DryRun cli flags
 	o.client.ClientOnly = false // Perform install against cluster
+	o.client.KubeVersion = nil
 
 	o.client.Wait = o.Wait // Wait for resources to be ready
 	// If part of the install fails and the Atomic option is set to True,

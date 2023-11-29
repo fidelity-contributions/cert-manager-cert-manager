@@ -18,6 +18,9 @@ package accounts
 
 import (
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"sync"
@@ -35,11 +38,15 @@ var ErrNotFound = errors.New("ACME client for issuer not initialised/available")
 type Registry interface {
 	// AddClient will ensure the registry has a stored ACME client for the Issuer
 	// object with the given UID, configuration and private key.
-	AddClient(client *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string)
+	AddClient(httpClient *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string)
 
 	// RemoveClient will remove a registered client using the UID of the Issuer
 	// resource that constructed it.
 	RemoveClient(uid string)
+
+	// IsKeyCheckSumCached checks if the private key checksum is cached with registered client.
+	// If not cached, the account is re-verified for the private key.
+	IsKeyCheckSumCached(lastPrivateKeyHash string, privateKey *rsa.PrivateKey) bool
 
 	Getter
 }
@@ -82,6 +89,8 @@ type stableOptions struct {
 	issuerUID     string
 	publicKey     string
 	exponent      int
+	caBundle      string
+	keyChecksum   [sha256.Size]byte
 }
 
 func (c stableOptions) equalTo(c2 stableOptions) bool {
@@ -91,12 +100,16 @@ func (c stableOptions) equalTo(c2 stableOptions) bool {
 func newStableOptions(uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey) stableOptions {
 	// Encoding a big.Int cannot fail
 	publicNBytes, _ := privateKey.PublicKey.N.GobEncode()
+	checksum := sha256.Sum256(x509.MarshalPKCS1PrivateKey(privateKey))
+
 	return stableOptions{
 		serverURL:     config.Server,
 		skipVerifyTLS: config.SkipTLSVerify,
 		issuerUID:     uid,
 		publicKey:     string(publicNBytes),
 		exponent:      privateKey.PublicKey.E,
+		caBundle:      string(config.CABundle),
+		keyChecksum:   checksum,
 	}
 }
 
@@ -110,9 +123,9 @@ type clientWithMeta struct {
 
 // AddClient will ensure the registry has a stored ACME client for the Issuer
 // object with the given UID, configuration and private key.
-func (r *registry) AddClient(client *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) {
+func (r *registry) AddClient(httpClient *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) {
 	// ensure the client is up to date for the current configuration
-	r.ensureClient(client, uid, config, privateKey, userAgent)
+	r.ensureClient(httpClient, uid, config, privateKey, userAgent)
 }
 
 // ensureClient will ensure an ACME client with the given parameters is registered.
@@ -120,21 +133,23 @@ func (r *registry) AddClient(client *http.Client, uid string, config cmacme.ACME
 // the client will NOT be mutated or replaced, allowing this method to be called
 // even if the client does not need replacing/updating without causing issues for
 // consumers of the registry.
-func (r *registry) ensureClient(client *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) {
+func (r *registry) ensureClient(httpClient *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) {
 	// acquire a read-write lock even if we hit the fast-path where the client
 	// is already present to avoid having to RLock, RUnlock and Lock again,
 	// which could itself cause a race
 	r.lock.Lock()
 	defer r.lock.Unlock()
+
 	newOpts := newStableOptions(uid, config, privateKey)
 	// fast-path if there is nothing to do
 	if meta, ok := r.clients[uid]; ok && meta.equalTo(newOpts) {
 		return
 	}
+
 	// create a new client if one is not registered or if the
 	// 'metadata' does not match
 	r.clients[uid] = clientWithMeta{
-		Interface:     NewClient(client, config, privateKey, userAgent),
+		Interface:     NewClient(httpClient, config, privateKey, userAgent),
 		stableOptions: newOpts,
 	}
 }
@@ -176,4 +191,27 @@ func (r *registry) ListClients() map[string]acmecl.Interface {
 		out[k] = v.Interface
 	}
 	return out
+}
+
+// IsKeyCheckSumCached returns true when there is no difference in private key checksum.
+// This can be used to identify if the private key has changed for the existing
+// registered client.
+func (r *registry) IsKeyCheckSumCached(lastPrivateKeyHash string, privateKey *rsa.PrivateKey) bool {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	if privateKey != nil && lastPrivateKeyHash != "" {
+		privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+		checksum := sha256.Sum256(privateKeyBytes)
+		checksumString := base64.StdEncoding.EncodeToString(checksum[:])
+
+		if lastPrivateKeyHash == checksumString {
+			return true
+		}
+
+	}
+
+	// Either there is no entry found in client cache for uid
+	// or private key checksum does not match with cached entry
+	return false
 }

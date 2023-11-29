@@ -19,6 +19,8 @@ package acme
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"net/url"
@@ -147,6 +149,8 @@ func (a *Acme) Setup(ctx context.Context) error {
 		return nil
 	}
 
+	isPKChecksumSame := a.accountRegistry.IsKeyCheckSumCached(a.issuer.GetStatus().ACMEStatus().LastPrivateKeyHash, rsaPk)
+
 	// TODO: don't always clear the client cache.
 	//  In future we should intelligently manage items in the account cache
 	//  and remove them when the corresponding issuer is updated/deleted.
@@ -155,7 +159,9 @@ func (a *Acme) Setup(ctx context.Context) error {
 	// We could therefore move the removing of the client up to the start of
 	// this function.
 	a.accountRegistry.RemoveClient(string(a.issuer.GetUID()))
-	httpClient := accounts.BuildHTTPClient(a.metrics, a.issuer.GetSpec().ACME.SkipTLSVerify)
+
+	httpClient := accounts.BuildHTTPClientWithCABundle(a.metrics, a.issuer.GetSpec().ACME.SkipTLSVerify, a.issuer.GetSpec().ACME.CABundle)
+
 	cl := a.clientBuilder(httpClient, *a.issuer.GetSpec().ACME, rsaPk, a.userAgent)
 
 	// TODO: perform a complex check to determine whether we need to verify
@@ -185,7 +191,6 @@ func (a *Acme) Setup(ctx context.Context) error {
 		// absorb errors as retrying will not help resolve this error
 		return nil
 	}
-
 	hasReadyCondition := apiutil.IssuerHasCondition(a.issuer, v1.IssuerCondition{
 		Type:   v1.IssuerConditionReady,
 		Status: cmmeta.ConditionTrue,
@@ -198,7 +203,8 @@ func (a *Acme) Setup(ctx context.Context) error {
 	if hasReadyCondition &&
 		a.issuer.GetStatus().ACMEStatus().URI != "" &&
 		parsedAccountURL.Host == parsedServerURL.Host &&
-		a.issuer.GetStatus().ACMEStatus().LastRegisteredEmail == a.issuer.GetSpec().ACME.Email {
+		a.issuer.GetStatus().ACMEStatus().LastRegisteredEmail == a.issuer.GetSpec().ACME.Email &&
+		isPKChecksumSame {
 		log.V(logf.InfoLevel).Info("skipping re-verifying ACME account as cached registration " +
 			"details look sufficient")
 
@@ -310,8 +316,12 @@ func (a *Acme) Setup(ctx context.Context) error {
 	status = cmmeta.ConditionTrue
 	reason = successAccountRegistered
 	msg = messageAccountRegistered
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(rsaPk)
+	checksum := sha256.Sum256(privateKeyBytes)
+	checksumString := base64.StdEncoding.EncodeToString(checksum[:])
 	a.issuer.GetStatus().ACMEStatus().URI = account.URI
 	a.issuer.GetStatus().ACMEStatus().LastRegisteredEmail = registeredEmail
+	a.issuer.GetStatus().ACMEStatus().LastPrivateKeyHash = checksumString
 	// ensure the cached client in the account registry is up to date
 	a.accountRegistry.AddClient(httpClient, string(a.issuer.GetUID()), *a.issuer.GetSpec().ACME, rsaPk, a.userAgent)
 

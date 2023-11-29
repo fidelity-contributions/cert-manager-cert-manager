@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"strconv"
 	"strings"
@@ -34,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
-	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
@@ -102,6 +103,11 @@ func SyncFnFor(
 			return nil
 		}
 
+		if isDeletedInForeground(ingLike) {
+			logf.V(logf.DebugLevel).Infof("not syncing ingress resource as it is being deleted via foreground cascading")
+			return nil
+		}
+
 		issuerName, issuerKind, issuerGroup, err := issuerForIngressLike(defaults, ingLike)
 		if err != nil {
 			log.Error(err, "failed to determine issuer to be used for ingress resource")
@@ -140,10 +146,11 @@ func SyncFnFor(
 						OwnerReferences: crt.OwnerReferences,
 					},
 					Spec: cmapi.CertificateSpec{
-						DNSNames:   crt.Spec.DNSNames,
-						SecretName: crt.Spec.SecretName,
-						IssuerRef:  crt.Spec.IssuerRef,
-						Usages:     crt.Spec.Usages,
+						DNSNames:    crt.Spec.DNSNames,
+						IPAddresses: crt.Spec.IPAddresses,
+						SecretName:  crt.Spec.SecretName,
+						IssuerRef:   crt.Spec.IssuerRef,
+						Usages:      crt.Spec.Usages,
 					},
 				})
 			} else {
@@ -239,7 +246,7 @@ func validateIngressTLSBlock(path *field.Path, tlsBlock networkingv1.IngressTLS)
 	return errs
 }
 
-func validateGatewayListenerBlock(path *field.Path, l gwapi.Listener) field.ErrorList {
+func validateGatewayListenerBlock(path *field.Path, l gwapi.Listener, ingLike metav1.Object) field.ErrorList {
 	var errs field.ErrorList
 
 	if l.Hostname == nil || *l.Hostname == "" {
@@ -257,11 +264,6 @@ func validateGatewayListenerBlock(path *field.Path, l gwapi.Listener) field.Erro
 	} else {
 		// check that each CertificateRef is valid
 		for i, secretRef := range l.TLS.CertificateRefs {
-			if secretRef == nil {
-				errs = append(errs, field.Required(path.Child("tls").Child("certificateRef").Index(i), "listener is missing a certificateRef"))
-				continue
-			}
-
 			if *secretRef.Group != "core" && *secretRef.Group != "" {
 				errs = append(errs, field.NotSupported(path.Child("tls").Child("certificateRef").Index(i).Child("group"),
 					*secretRef.Group, []string{"core", ""}))
@@ -270,6 +272,11 @@ func validateGatewayListenerBlock(path *field.Path, l gwapi.Listener) field.Erro
 			if *secretRef.Kind != "Secret" && *secretRef.Kind != "" {
 				errs = append(errs, field.NotSupported(path.Child("tls").Child("certificateRef").Index(i).Child("kind"),
 					*secretRef.Kind, []string{"Secret", ""}))
+			}
+
+			if secretRef.Namespace != nil && string(*secretRef.Namespace) != ingLike.GetNamespace() {
+				errs = append(errs, field.Invalid(path.Child("tls").Child("certificateRef").Index(i).Child("namespace"),
+					*secretRef.Namespace, "cross-namespace secret references are not allowed in listeners"))
 			}
 		}
 	}
@@ -315,7 +322,12 @@ func buildCertificates(
 		}
 	case *gwapi.Gateway:
 		for i, l := range ingLike.Spec.Listeners {
-			err := validateGatewayListenerBlock(field.NewPath("spec", "listeners").Index(i), l).ToAggregate()
+			// TLS is only supported for a limited set of protocol types: https://gateway-api.sigs.k8s.io/guides/tls/#listeners-and-tls
+			if l.Protocol != gwapi.HTTPSProtocolType && l.Protocol != gwapi.TLSProtocolType {
+				continue
+			}
+
+			err := validateGatewayListenerBlock(field.NewPath("spec", "listeners").Index(i), l, ingLike).ToAggregate()
 			if err != nil {
 				rec.Eventf(ingLike, corev1.EventTypeWarning, reasonBadConfig, "Skipped a listener block: "+err.Error())
 				continue
@@ -353,6 +365,17 @@ func buildCertificates(
 			controllerGVK = gatewayGVK
 		}
 
+		var (
+			ipAddress, dnsNames []string
+		)
+		for _, h := range hosts {
+			if ip := net.ParseIP(h); ip != nil {
+				ipAddress = append(ipAddress, h)
+			} else {
+				dnsNames = append(dnsNames, h)
+			}
+		}
+
 		crt := &cmapi.Certificate{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            secretRef.Name,
@@ -361,8 +384,9 @@ func buildCertificates(
 				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ingLike, controllerGVK)},
 			},
 			Spec: cmapi.CertificateSpec{
-				DNSNames:   hosts,
-				SecretName: secretRef.Name,
+				DNSNames:    dnsNames,
+				IPAddresses: ipAddress,
+				SecretName:  secretRef.Name,
 				IssuerRef: cmmeta.ObjectReference{
 					Name:  issuerName,
 					Kind:  issuerKind,
@@ -448,9 +472,6 @@ func secretNameUsedIn(secretName string, ingLike metav1.Object) bool {
 				continue
 			}
 			for _, certRef := range l.TLS.CertificateRefs {
-				if certRef == nil {
-					continue
-				}
 				if secretName == string(certRef.Name) {
 					return true
 				}
@@ -566,27 +587,29 @@ func certNeedsUpdate(a, b *cmapi.Certificate) bool {
 // setIssuerSpecificConfig configures given Certificate's annotation by reading
 // two Ingress-specific annotations.
 //
-// (1) The edit-in-place Ingress annotation allows the use of Ingress
-//     controllers that map a single IP address to a single Ingress
-//     resource, such as the GCE ingress controller. The the following
-//     annotation on an Ingress named "my-ingress":
+// (1)
+// The edit-in-place Ingress annotation allows the use of Ingress
+// controllers that map a single IP address to a single Ingress
+// resource, such as the GCE ingress controller. The the following
+// annotation on an Ingress named "my-ingress":
 //
-//       acme.cert-manager.io/http01-edit-in-place: "true"
+//	acme.cert-manager.io/http01-edit-in-place: "true"
 //
-//     configures the Certificate with two annotations:
+// configures the Certificate with two annotations:
 //
-//       acme.cert-manager.io/http01-override-ingress-name: my-ingress
-//       cert-manager.io/issue-temporary-certificate: "true"
+//	acme.cert-manager.io/http01-override-ingress-name: my-ingress
+//	cert-manager.io/issue-temporary-certificate: "true"
 //
-// (2) The ingress-class Ingress annotation allows users to override the
-//     Issuer's acme.solvers[0].http01.ingress.class. For example, on the
-//     Ingress:
+// (2)
+// The ingress-class Ingress annotation allows users to override the
+// Issuer's acme.solvers[0].http01.ingress.class. For example, on the
+// Ingress:
 //
-//       acme.cert-manager.io/http01-ingress-class: traefik
+//	acme.cert-manager.io/http01-ingress-class: traefik
 //
-//     configures the Certificate using the override-ingress-class annotation:
+// configures the Certificate using the override-ingress-class annotation:
 //
-//       acme.cert-manager.io/http01-override-ingress-class: traefik
+//	acme.cert-manager.io/http01-override-ingress-class: traefik
 func setIssuerSpecificConfig(crt *cmapi.Certificate, ingLike metav1.Object) {
 	ingAnnotations := ingLike.GetAnnotations()
 	if ingAnnotations == nil {
@@ -620,15 +643,14 @@ func setIssuerSpecificConfig(crt *cmapi.Certificate, ingLike metav1.Object) {
 // hasShimAnnotation returns true if the given ingress-like resource contains
 // one of the trigger annotations:
 //
-//   cert-manager.io/issuer
-//   cert-manager.io/cluster-issuer
+//	cert-manager.io/issuer
+//	cert-manager.io/cluster-issuer
 //
 // The autoCertificateAnnotations can also be used to customize additional
 // annotations to trigger a Certificate shim. For example, for Ingress
 // resources, we default autoCertificateAnnotations to:
 //
-//   kubernetes.io/tls-acme: "true"
-//
+//	kubernetes.io/tls-acme: "true"
 func hasShimAnnotation(ingLike metav1.Object, autoCertificateAnnotations []string) bool {
 	annotations := ingLike.GetAnnotations()
 	if annotations == nil {
@@ -650,15 +672,37 @@ func hasShimAnnotation(ingLike metav1.Object, autoCertificateAnnotations []strin
 	return false
 }
 
+// isDeletedInForeground returns true if the given ingressLike resource
+// contains either
+//
+// metadata.deletionTimestamp, or
+// metadata.finalizers having one of the values as foregroundDeletion
+//
+// which indicates that the resource is being deleted via foreground cascading.
+// Ref: https://kubernetes.io/docs/concepts/architecture/garbage-collection/#foreground-deletion
+func isDeletedInForeground(ingLike metav1.Object) bool {
+	deletionTimestamp := ingLike.GetDeletionTimestamp()
+	finalizers := ingLike.GetFinalizers()
+	foregroundDeletion := false
+
+	for _, v := range finalizers {
+		if v == metav1.FinalizerDeleteDependents {
+			foregroundDeletion = true
+		}
+	}
+
+	return deletionTimestamp != nil || foregroundDeletion
+}
+
 // issuerForIngressLike determines the Issuer that should be specified on a
 // Certificate created for the given ingress-like resource. If one is not set,
 // the default issuer given to the controller is used. We look up the following
 // Ingress annotations:
 //
-//   cert-manager.io/cluster-issuer
-//   cert-manager.io/issuer
-//   cert-manager.io/issuer-kind
-//   cert-manager.io/issuer-group
+//	cert-manager.io/cluster-issuer
+//	cert-manager.io/issuer
+//	cert-manager.io/issuer-kind
+//	cert-manager.io/issuer-group
 func issuerForIngressLike(defaults controller.IngressShimOptions, ingLike metav1.Object) (name, kind, group string, err error) {
 	var errs []string
 

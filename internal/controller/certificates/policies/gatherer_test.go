@@ -27,12 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	cmscheme "github.com/cert-manager/cert-manager/pkg/api"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
@@ -146,15 +144,6 @@ func TestDataForCertificate(t *testing.T) {
 			test.builder.T = t
 			test.builder.Clock = fakeclock.NewFakeClock(fakeClockStart)
 
-			// In this test, we do not use Register(controller.Context).
-			// The Register(controller.Context) usually takes care of
-			// triggering the init() func in ./pkg/api/scheme.go. If we
-			// forget to have the init() func called, the apiVersion and
-			// kind fields on cert-manager objects are not automatically
-			// filled, which breaks the lister cache (i.e., the "indexer").
-			_ = cmscheme.Scheme
-			_ = kscheme.Scheme
-
 			test.builder.Init()
 
 			// One weird behavior in client-go is that listers won't return
@@ -168,7 +157,7 @@ func TestDataForCertificate(t *testing.T) {
 			// type by registering a fake handler.
 			noop := cache.ResourceEventHandlerFuncs{AddFunc: func(obj interface{}) {}}
 			test.builder.SharedInformerFactory.Certmanager().V1().CertificateRequests().Informer().AddEventHandler(noop)
-			test.builder.KubeSharedInformerFactory.Core().V1().Secrets().Informer().AddEventHandler(noop)
+			test.builder.KubeSharedInformerFactory.Secrets().Informer().AddEventHandler(noop)
 
 			// Even though we are only relying on listers in this unit test
 			// and do not use the informer event handlers, we still need to
@@ -212,7 +201,7 @@ func TestDataForCertificate(t *testing.T) {
 
 			g := &Gatherer{
 				CertificateRequestLister: test.builder.SharedInformerFactory.Certmanager().V1().CertificateRequests().Lister(),
-				SecretLister:             test.builder.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+				SecretLister:             test.builder.KubeSharedInformerFactory.Secrets().Lister(),
 			}
 
 			ctx := logf.NewContext(context.Background(), logf.WithResource(log, test.givenCert))

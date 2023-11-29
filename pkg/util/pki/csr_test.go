@@ -29,12 +29,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 
-	"github.com/cert-manager/cert-manager/internal/controller/feature"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/cert-manager/cert-manager/pkg/util"
-	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 func buildCertificate(cn string, dnsNames ...string) *cmapi.Certificate {
@@ -46,7 +43,7 @@ func buildCertificate(cn string, dnsNames ...string) *cmapi.Certificate {
 	}
 }
 
-func TestBuildUsages(t *testing.T) {
+func TestKeyUsagesForCertificate(t *testing.T) {
 	type testT struct {
 		name                string
 		usages              []cmapi.KeyUsage
@@ -101,7 +98,7 @@ func TestBuildUsages(t *testing.T) {
 	}
 	testFn := func(test testT) func(*testing.T) {
 		return func(t *testing.T) {
-			ku, eku, err := BuildKeyUsages(test.usages, test.isCa)
+			ku, eku, err := KeyUsagesForCertificateOrCertificateRequest(test.usages, test.isCa)
 			if err != nil && !test.expectedError {
 				t.Errorf("got unexpected error generating cert: %q", err)
 				return
@@ -388,6 +385,20 @@ func TestRemoveDuplicates(t *testing.T) {
 	}
 }
 
+func removeDuplicates(in []string) []string {
+	var found []string
+Outer:
+	for _, i := range in {
+		for _, i2 := range found {
+			if i2 == i {
+				continue Outer
+			}
+		}
+		found = append(found, i)
+	}
+	return found
+}
+
 func TestGenerateCSR(t *testing.T) {
 	// 0xa0 = DigitalSignature and Encipherment usage
 	asn1KeyUsage, err := asn1.Marshal(asn1.BitString{Bytes: []byte{0xa0}, BitLength: asn1BitLength([]byte{0xa0})})
@@ -396,8 +407,9 @@ func TestGenerateCSR(t *testing.T) {
 	}
 	defaultExtraExtensions := []pkix.Extension{
 		{
-			Id:    OIDExtensionKeyUsage,
-			Value: asn1KeyUsage,
+			Id:       OIDExtensionKeyUsage,
+			Value:    asn1KeyUsage,
+			Critical: true,
 		},
 	}
 
@@ -407,8 +419,9 @@ func TestGenerateCSR(t *testing.T) {
 	}
 	ipsecExtraExtensions := []pkix.Extension{
 		{
-			Id:    OIDExtensionKeyUsage,
-			Value: asn1KeyUsage,
+			Id:       OIDExtensionKeyUsage,
+			Value:    asn1KeyUsage,
+			Critical: true,
 		},
 		{
 			Id:    OIDExtensionExtendedKeyUsage,
@@ -416,14 +429,38 @@ func TestGenerateCSR(t *testing.T) {
 		},
 	}
 
+	basicConstraintsGenerator := func(isCA bool) ([]byte, error) {
+		return asn1.Marshal(struct {
+			IsCA bool `asn1:"optional"`
+		}{
+			IsCA: isCA,
+		})
+	}
+
+	basicConstraintsWithCA, err := basicConstraintsGenerator(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	basicConstraintsWithoutCA, err := basicConstraintsGenerator(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 0xa0 = DigitalSignature, Encipherment and KeyCertSign usage
+	asn1KeyUsageWithCa, err := asn1.Marshal(asn1.BitString{Bytes: []byte{0xa4}, BitLength: asn1BitLength([]byte{0xa4})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	exampleLiteralSubject := "CN=actual-cn, OU=FooLong, OU=Bar, O=example.org"
-	rawExampleLiteralSubject, err := ParseSubjectStringToRawDerBytes(exampleLiteralSubject)
+	rawExampleLiteralSubject, err := ParseSubjectStringToRawDERBytes(exampleLiteralSubject)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	exampleMultiValueRDNLiteralSubject := "CN=actual-cn, OU=FooLong+OU=Bar, O=example.org"
-	rawExampleMultiValueRDNLiteralSubject, err := ParseSubjectStringToRawDerBytes(exampleMultiValueRDNLiteralSubject)
+	rawExampleMultiValueRDNLiteralSubject, err := ParseSubjectStringToRawDERBytes(exampleMultiValueRDNLiteralSubject)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,6 +471,7 @@ func TestGenerateCSR(t *testing.T) {
 		want                                    *x509.CertificateRequest
 		wantErr                                 bool
 		literalCertificateSubjectFeatureEnabled bool
+		basicConstraintsFeatureEnabled          bool
 	}{
 		{
 			name: "Generate CSR from certificate with only DNS",
@@ -456,6 +494,69 @@ func TestGenerateCSR(t *testing.T) {
 				Subject:            pkix.Name{CommonName: "example.org"},
 				ExtraExtensions:    defaultExtraExtensions,
 			},
+		},
+		{
+			name: "Generate CSR from certificate with isCA set",
+			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org", IsCA: true}},
+			want: &x509.CertificateRequest{
+				Version:            0,
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				PublicKeyAlgorithm: x509.RSA,
+				Subject:            pkix.Name{CommonName: "example.org"},
+				ExtraExtensions: []pkix.Extension{
+					{
+						Id:       OIDExtensionKeyUsage,
+						Value:    asn1KeyUsageWithCa,
+						Critical: true,
+					},
+				},
+			},
+		},
+		{
+			name: "Generate CSR from certificate with isCA not set and with UseCertificateRequestBasicConstraints flag enabled",
+			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org"}},
+			want: &x509.CertificateRequest{
+				Version:            0,
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				PublicKeyAlgorithm: x509.RSA,
+				Subject:            pkix.Name{CommonName: "example.org"},
+				ExtraExtensions: []pkix.Extension{
+					{
+						Id:       OIDExtensionKeyUsage,
+						Value:    asn1KeyUsage,
+						Critical: true,
+					},
+					{
+						Id:       OIDExtensionBasicConstraints,
+						Value:    basicConstraintsWithoutCA,
+						Critical: true,
+					},
+				},
+			},
+			basicConstraintsFeatureEnabled: true,
+		},
+		{
+			name: "Generate CSR from certificate with isCA set and with UseCertificateRequestBasicConstraints flag enabled",
+			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org", IsCA: true}},
+			want: &x509.CertificateRequest{
+				Version:            0,
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				PublicKeyAlgorithm: x509.RSA,
+				Subject:            pkix.Name{CommonName: "example.org"},
+				ExtraExtensions: []pkix.Extension{
+					{
+						Id:       OIDExtensionKeyUsage,
+						Value:    asn1KeyUsageWithCa,
+						Critical: true,
+					},
+					{
+						Id:       OIDExtensionBasicConstraints,
+						Value:    basicConstraintsWithCA,
+						Critical: true,
+					},
+				},
+			},
+			basicConstraintsFeatureEnabled: true,
 		},
 		{
 			name: "Generate CSR from certificate with extended key usages",
@@ -517,8 +618,11 @@ func TestGenerateCSR(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultMutableFeatureGate, feature.LiteralCertificateSubject, tt.literalCertificateSubjectFeatureEnabled)()
-			got, err := GenerateCSR(tt.crt)
+			got, err := GenerateCSR(
+				tt.crt,
+				WithEncodeBasicConstraintsInRequest(tt.basicConstraintsFeatureEnabled),
+				WithUseLiteralSubject(tt.literalCertificateSubjectFeatureEnabled),
+			)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateCSR() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -558,8 +662,9 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 			crt:  &cmapi.Certificate{},
 			want: []pkix.Extension{
 				{
-					Id:    OIDExtensionKeyUsage,
-					Value: asn1DefaultKeyUsage,
+					Id:       OIDExtensionKeyUsage,
+					Value:    asn1DefaultKeyUsage,
+					Critical: true,
 				},
 			},
 			wantErr: false,
@@ -573,8 +678,9 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 			},
 			want: []pkix.Extension{
 				{
-					Id:    OIDExtensionKeyUsage,
-					Value: asn1DefaultKeyUsage,
+					Id:       OIDExtensionKeyUsage,
+					Value:    asn1DefaultKeyUsage,
+					Critical: true,
 				},
 				{
 					Id:    OIDExtensionExtendedKeyUsage,
@@ -592,8 +698,9 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 			},
 			want: []pkix.Extension{
 				{
-					Id:    OIDExtensionKeyUsage,
-					Value: asn1DefaultKeyUsage,
+					Id:       OIDExtensionKeyUsage,
+					Value:    asn1DefaultKeyUsage,
+					Critical: true,
 				},
 				{
 					Id:    OIDExtensionExtendedKeyUsage,
@@ -626,7 +733,7 @@ func TestSignCSRTemplate(t *testing.T) {
 		pk, err := GenerateECPrivateKey(256)
 		require.NoError(t, err)
 		tmpl := &x509.Certificate{
-			Version:               2,
+			Version:               3,
 			BasicConstraintsValid: true,
 			SerialNumber:          big.NewInt(0),
 			Subject: pkix.Name{

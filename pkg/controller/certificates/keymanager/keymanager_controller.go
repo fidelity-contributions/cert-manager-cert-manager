@@ -28,20 +28,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
 	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
@@ -64,7 +62,7 @@ var (
 
 type controller struct {
 	certificateLister cmlisters.CertificateLister
-	secretLister      corelisters.SecretLister
+	secretLister      internalinformers.SecretLister
 	client            cmclient.Interface
 	coreClient        kubernetes.Interface
 	recorder          record.EventRecorder
@@ -76,20 +74,14 @@ type controller struct {
 }
 
 func NewController(
-	log logr.Logger,
-	client cmclient.Interface,
-	coreClient kubernetes.Interface,
-	factory informers.SharedInformerFactory,
-	cmFactory cminformers.SharedInformerFactory,
-	recorder record.EventRecorder,
-	fieldManager string,
+	log logr.Logger, ctx *controllerpkg.Context,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
 
 	// obtain references to all the informers used by this controller
-	certificateInformer := cmFactory.Certmanager().V1().Certificates()
-	secretsInformer := factory.Core().V1().Secrets()
+	certificateInformer := ctx.SharedInformerFactory.Certmanager().V1().Certificates()
+	secretsInformer := ctx.KubeSharedInformerFactory.Secrets()
 
 	certificateInformer.Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{Queue: queue})
 
@@ -116,10 +108,10 @@ func NewController(
 	return &controller{
 		certificateLister: certificateInformer.Lister(),
 		secretLister:      secretsInformer.Lister(),
-		client:            client,
-		coreClient:        coreClient,
-		recorder:          recorder,
-		fieldManager:      fieldManager,
+		client:            ctx.CMClient,
+		coreClient:        ctx.Client,
+		recorder:          ctx.Recorder,
+		fieldManager:      ctx.FieldManager,
 	}, queue, mustSync
 }
 
@@ -128,7 +120,7 @@ func NewController(
 var isNextPrivateKeyLabelSelector labels.Selector
 
 func init() {
-	r, err := labels.NewRequirement("cert-manager.io/next-private-key", selection.Equals, []string{"true"})
+	r, err := labels.NewRequirement(cmapi.IsNextPrivateKeySecretLabelKey, selection.Equals, []string{"true"})
 	if err != nil {
 		panic(err)
 	}
@@ -220,7 +212,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return c.deleteSecretResources(ctx, secrets)
 	}
 
-	violations, err := certificates.PrivateKeyMatchesSpec(pk, crt.Spec)
+	violations, err := pki.PrivateKeyMatchesSpec(pk, crt.Spec)
 	if err != nil {
 		log.Error(err, "Internal error verifying if private key matches spec - please open an issue.")
 		return nil
@@ -254,7 +246,7 @@ func (c *controller) createNextPrivateKeyRotationPolicyNever(ctx context.Context
 		c.recorder.Eventf(crt, corev1.EventTypeWarning, reasonDecodeFailed, "Failed to decode private key stored in Secret %q - generating new key", crt.Spec.SecretName)
 		return c.createAndSetNextPrivateKey(ctx, crt)
 	}
-	violations, err := certificates.PrivateKeyMatchesSpec(pk, crt.Spec)
+	violations, err := pki.PrivateKeyMatchesSpec(pk, crt.Spec)
 	if err != nil {
 		c.recorder.Eventf(crt, corev1.EventTypeWarning, reasonDecodeFailed, "Failed to check if private key stored in Secret %q is up to date - generating new key", crt.Spec.SecretName)
 		return c.createAndSetNextPrivateKey(ctx, crt)
@@ -351,7 +343,8 @@ func (c *controller) createNewPrivateKeySecret(ctx context.Context, crt *cmapi.C
 			Name:            name,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(crt, certificateGvk)},
 			Labels: map[string]string{
-				"cert-manager.io/next-private-key": "true",
+				cmapi.IsNextPrivateKeySecretLabelKey:      "true",
+				cmapi.PartOfCertManagerControllerLabelKey: "true",
 			},
 		},
 		Data: map[string][]byte{
@@ -379,14 +372,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 	// construct a new named logger to be reused throughout the controller
 	log := logf.FromContext(ctx.RootContext, ControllerName)
 
-	ctrl, queue, mustSync := NewController(log,
-		ctx.CMClient,
-		ctx.Client,
-		ctx.KubeSharedInformerFactory,
-		ctx.SharedInformerFactory,
-		ctx.Recorder,
-		ctx.FieldManager,
-	)
+	ctrl, queue, mustSync := NewController(log, ctx)
 	c.controller = ctrl
 
 	return queue, mustSync, nil

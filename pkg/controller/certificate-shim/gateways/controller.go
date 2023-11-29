@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	gwlisters "sigs.k8s.io/gateway-api/pkg/client/listers/gateway/apis/v1alpha2"
+	gwlisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
@@ -53,14 +53,14 @@ type controller struct {
 }
 
 func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitingInterface, []cache.InformerSynced, error) {
-	c.gatewayLister = ctx.GWShared.Gateway().V1alpha2().Gateways().Lister()
+	c.gatewayLister = ctx.GWShared.Gateway().V1beta1().Gateways().Lister()
 	log := logf.FromContext(ctx.RootContext, ControllerName)
 	c.sync = shimhelper.SyncFnFor(ctx.Recorder, log, ctx.CMClient, ctx.SharedInformerFactory.Certmanager().V1().Certificates().Lister(), ctx.IngressShimOptions, ctx.FieldManager)
 
 	// We don't need to requeue Gateways on "Deleted" events, since our Sync
 	// function does nothing when the Gateway lister returns "not found". But we
 	// still do it for consistency with the rest of the controllers.
-	ctx.GWShared.Gateway().V1alpha2().Gateways().Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{
+	ctx.GWShared.Gateway().V1beta1().Gateways().Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{
 		Queue: c.queue,
 	})
 
@@ -79,7 +79,7 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	})
 
 	mustSync := []cache.InformerSynced{
-		ctx.GWShared.Gateway().V1alpha2().Gateways().Informer().HasSynced,
+		ctx.GWShared.Gateway().V1beta1().Gateways().Informer().HasSynced,
 		ctx.SharedInformerFactory.Certmanager().V1().Certificates().Informer().HasSynced,
 	}
 
@@ -93,7 +93,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return nil
 	}
 
-	crt, err := c.gatewayLister.Gateways(namespace).Get(name)
+	gateway, err := c.gatewayLister.Gateways(namespace).Get(name)
 
 	if err != nil {
 		if k8sErrors.IsNotFound(err) {
@@ -104,7 +104,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return err
 	}
 
-	return c.sync(ctx, crt)
+	return c.sync(ctx, gateway)
 }
 
 // Whenever a Certificate gets updated, added or deleted, we want to reconcile
@@ -112,16 +112,16 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 // example, the following Certificate "cert-1" is controlled by the Gateway
 // "gateway-1":
 //
-//     kind: Certificate
-//     metadata:                                           Note that the owner
-//       namespace: cert-1                                 reference does not
-//       ownerReferences:                                  have a namespace,
-//       - controller: true                                since owner refs
-//         apiVersion: networking.x-k8s.io/v1alpha1        only work inside
-//         kind: Gateway                                   the same namespace.
-//         name: gateway-1
-//         blockOwnerDeletion: true
-//         uid: 7d3897c2-ce27-4144-883a-e1b5f89bd65a
+//	kind: Certificate
+//	metadata:                                           Note that the owner
+//	  namespace: cert-1                                 reference does not
+//	  ownerReferences:                                  have a namespace,
+//	  - controller: true                                since owner refs
+//	    apiVersion: networking.x-k8s.io/v1alpha1        only work inside
+//	    kind: Gateway                                   the same namespace.
+//	    name: gateway-1
+//	    blockOwnerDeletion: true
+//	    uid: 7d3897c2-ce27-4144-883a-e1b5f89bd65a
 func certificateHandler(queue workqueue.RateLimitingInterface) func(obj interface{}) {
 	return func(obj interface{}) {
 		crt, ok := obj.(*cmapi.Certificate)

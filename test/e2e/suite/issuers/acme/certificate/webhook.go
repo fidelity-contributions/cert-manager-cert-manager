@@ -20,19 +20,19 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
+	"github.com/cert-manager/cert-manager/e2e-tests/util"
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
-	"github.com/cert-manager/cert-manager/test/e2e/util"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -128,50 +128,46 @@ var _ = framework.CertManagerDescribe("ACME webhook DNS provider", func() {
 			var order *cmacme.Order
 			logf, done := log.LogBackoff()
 			defer done()
-			pollErr := wait.PollImmediate(2*time.Second, time.Minute*1,
-				func() (bool, error) {
-					orders, err := listOwnedOrders(f.CertManagerClientSet, cert)
-					Expect(err).NotTo(HaveOccurred())
+			pollErr := wait.PollUntilContextTimeout(context.TODO(), 2*time.Second, time.Minute*1, true, func(ctx context.Context) (bool, error) {
+				orders, err := listOwnedOrders(f.CertManagerClientSet, cert)
+				Expect(err).NotTo(HaveOccurred())
 
-					logf("Found %d orders for certificate", len(orders))
-					if len(orders) == 1 {
-						order = orders[0]
-						logf("Found order named %q", order.Name)
-						return true, nil
-					}
+				logf("Found %d orders for certificate", len(orders))
+				if len(orders) == 1 {
+					order = orders[0]
+					logf("Found order named %q", order.Name)
+					return true, nil
+				}
 
-					logf("Waiting as one Order should exist, but we found %d", len(orders))
-					return false, nil
-				},
-			)
+				logf("Waiting as one Order should exist, but we found %d", len(orders))
+				return false, nil
+			})
 			Expect(pollErr).NotTo(HaveOccurred())
 
 			logf, done = log.LogBackoff()
 			defer done()
-			pollErr = wait.PollImmediate(2*time.Second, time.Minute*3,
-				func() (bool, error) {
-					l, err := listOwnedChallenges(f.CertManagerClientSet, order)
-					Expect(err).NotTo(HaveOccurred())
+			pollErr = wait.PollUntilContextTimeout(context.TODO(), 2*time.Second, time.Minute*3, true, func(ctx context.Context) (bool, error) {
+				l, err := listOwnedChallenges(f.CertManagerClientSet, order)
+				Expect(err).NotTo(HaveOccurred())
 
-					logf("Found %d challenges", len(l))
-					if len(l) == 0 {
-						logf("Waiting for at least one challenge to exist")
-						return false, nil
+				logf("Found %d challenges", len(l))
+				if len(l) == 0 {
+					logf("Waiting for at least one challenge to exist")
+					return false, nil
+				}
+
+				allPresented := true
+				for _, ch := range l {
+					logf("Found challenge named %q", ch.Name)
+
+					if ch.Status.Presented == false {
+						logf("Challenge %q has not been 'Presented'", ch.Name)
+						allPresented = false
 					}
+				}
 
-					allPresented := true
-					for _, ch := range l {
-						logf("Found challenge named %q", ch.Name)
-
-						if ch.Status.Presented == false {
-							logf("Challenge %q has not been 'Presented'", ch.Name)
-							allPresented = false
-						}
-					}
-
-					return allPresented, nil
-				},
-			)
+				return allPresented, nil
+			})
 			Expect(pollErr).NotTo(HaveOccurred())
 		})
 	})

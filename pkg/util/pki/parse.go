@@ -20,12 +20,9 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/pem"
 
 	"github.com/cert-manager/cert-manager/pkg/util/errors"
-	"github.com/go-ldap/ldap/v3"
 )
 
 // DecodePrivateKeyBytes will decode a PEM encoded private key into a crypto.Signer.
@@ -168,16 +165,23 @@ func ParseSingleCertificateChainPEM(pembundle []byte) (PEMBundle, error) {
 }
 
 // ParseSingleCertificateChain returns the PEM-encoded chain of certificates as
-// well as the PEM-encoded CA certificate. The certificate chain contains the
-// leaf certificate first.
+// well as the PEM-encoded CA certificate.
 //
-// The CA may not be a true root, but the highest intermediate certificate.
-// The returned CA may be empty if a single certificate was passed.
+// The CA (CAPEM) may not be a true root, but the highest intermediate certificate.
+// The certificate is chosen as follows:
+//   - If the chain has a self-signed root, the root certificate.
+//   - If the chain has no self-signed root and has > 1 certificates, the highest certificate in the chain.
+//   - If the chain has no self-signed root and has == 1 certificate, nil.
+//
+// The certificate chain (ChainPEM) starts with the leaf certificate and ends with the
+// highest certificate in the chain which is not self-signed. Self-signed certificates
+// are not included in the chain because we are certain they are known and trusted by the
+// client already.
 //
 // This function removes duplicate certificate entries as well as comments and
 // unnecessary white space.
 //
-// An error is returned if the passed bundle is not a valid flat tree chain,
+// An error is returned if the passed bundle is not a valid single chain,
 // the bundle is malformed, or the chain is broken.
 func ParseSingleCertificateChain(certs []*x509.Certificate) (PEMBundle, error) {
 	// De-duplicate certificates. This moves "complicated" logic away from
@@ -321,13 +325,13 @@ func (c *chainNode) toBundleAndCA() (PEMBundle, error) {
 // following diagram, C.CheckSignatureFrom(P) is satisfied, i.e., the
 // signature ("sig") on the certificate C can be verified using the parent P:
 //
-//       head                                         tail
-//  +------+-------+      +------+-------+      +------+-------+
-//  |      |       |      |      |       |      |      |       |
-//  |      |  sig ------->|  C   |  sig ------->|  P   |       |
-//  |      |       |      |      |       |      |      |       |
-//  +------+-------+      +------+-------+      +------+-------+
-//  leaf certificate                            root certificate
+//	     head                                         tail
+//	+------+-------+      +------+-------+      +------+-------+
+//	|      |       |      |      |       |      |      |       |
+//	|      |  sig ------->|  C   |  sig ------->|  P   |       |
+//	|      |       |      |      |       |      |      |       |
+//	+------+-------+      +------+-------+      +------+-------+
+//	leaf certificate                            root certificate
 //
 // The function returns false if the chains A and B are not gluable.
 func (c *chainNode) tryMergeChain(chain *chainNode) (*chainNode, bool) {
@@ -362,75 +366,4 @@ func (c *chainNode) root() *chainNode {
 // signed by itself, which would make it a "root" certificate.
 func isSelfSignedCertificate(cert *x509.Certificate) bool {
 	return cert.CheckSignatureFrom(cert) == nil
-}
-
-var OIDConstants = struct {
-	Country            []int
-	Organization       []int
-	OrganizationalUnit []int
-	CommonName         []int
-	SerialNumber       []int
-	Locality           []int
-	Province           []int
-	StreetAddress      []int
-}{
-	Country:            []int{2, 5, 4, 6},
-	Organization:       []int{2, 5, 4, 10},
-	OrganizationalUnit: []int{2, 5, 4, 11},
-	CommonName:         []int{2, 5, 4, 3},
-	SerialNumber:       []int{2, 5, 4, 5},
-	Locality:           []int{2, 5, 4, 7},
-	Province:           []int{2, 5, 4, 8},
-	StreetAddress:      []int{2, 5, 4, 9},
-}
-
-// Copied from pkix.attributeTypeNames and inverted. (Sadly it is private.)
-// Source: https://cs.opensource.google/go/go/+/refs/tags/go1.18.2:src/crypto/x509/pkix/pkix.go;l=26
-var attributeTypeNames = map[string][]int{
-	"C":            OIDConstants.Country,
-	"O":            OIDConstants.Organization,
-	"OU":           OIDConstants.OrganizationalUnit,
-	"CN":           OIDConstants.CommonName,
-	"SERIALNUMBER": OIDConstants.SerialNumber,
-	"L":            OIDConstants.Locality,
-	"ST":           OIDConstants.Province,
-	"STREET":       OIDConstants.StreetAddress,
-}
-
-func ParseSubjectStringToRdnSequence(subject string) (pkix.RDNSequence, error) {
-
-	dns, err := ldap.ParseDN(subject)
-	if err != nil {
-		return nil, err
-	}
-
-	// Traverse the parsed RDNSequence in REVERSE order as RDNs in String format are expected to be written in reverse order.
-	// Meaning, a string of "CN=Foo,OU=Bar,O=Baz" actually should have "O=Baz" as the first element in the RDNSequence.
-	var rdns pkix.RDNSequence
-	for i := range dns.RDNs {
-		ldapRelativeDN := dns.RDNs[len(dns.RDNs)-i-1]
-
-		var atvs []pkix.AttributeTypeAndValue
-		for _, ldapATV := range ldapRelativeDN.Attributes {
-
-			atvs = append(atvs, pkix.AttributeTypeAndValue{
-				Type:  attributeTypeNames[ldapATV.Type],
-				Value: ldapATV.Value,
-			})
-
-		}
-		rdns = append(rdns, atvs)
-	}
-	return rdns, nil
-
-}
-
-func ParseSubjectStringToRawDerBytes(subject string) ([]byte, error) {
-	rdnSequenceFromLiteralString, err := ParseSubjectStringToRdnSequence(subject)
-	if err != nil {
-		return nil, err
-	}
-
-	return asn1.Marshal(rdnSequenceFromLiteralString)
-
 }

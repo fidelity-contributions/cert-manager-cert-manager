@@ -22,13 +22,12 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"math/big"
 	"testing"
 	"time"
 
-	"github.com/Venafi/vcert/v4/pkg/endpoint"
+	"github.com/Venafi/vcert/v5/pkg/endpoint"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,11 +36,12 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/pkg/controller"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
 	controllertest "github.com/cert-manager/cert-manager/pkg/controller/test"
 	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
@@ -58,24 +58,14 @@ var (
 	fixedClock      = fakeclock.NewFakeClock(fixedClockStart)
 )
 
-func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgorithm) []byte {
-	template := x509.CertificateRequest{
-		Subject: pkix.Name{
-			CommonName: "test-common-name",
-		},
-		DNSNames: []string{
-			"foo.example.com", "bar.example.com",
-		},
-		SignatureAlgorithm: alg,
-		PublicKey:          secretKey.Public(),
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, secretKey)
+func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
+	csr, err := gen.CSRWithSigner(secretKey,
+		gen.SetCSRCommonName("test-common-name"),
+		gen.SetCSRDNSNames("foo.example.com", "bar.example.com"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	return csr
 }
@@ -93,7 +83,7 @@ func TestSign(t *testing.T) {
 	}
 
 	rootTmpl := &x509.Certificate{
-		Version:               2,
+		Version:               3,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		PublicKeyAlgorithm:    x509.ECDSA,
@@ -116,7 +106,7 @@ func TestSign(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	csrPEM := generateCSR(t, testPK, x509.ECDSAWithSHA256)
+	csrPEM := generateCSR(t, testPK)
 
 	tppSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -221,7 +211,7 @@ func TestSign(t *testing.T) {
 		},
 	}
 
-	template, err := pki.GenerateTemplateFromCertificateRequest(baseCR)
+	template, err := pki.CertificateTemplateFromCertificateRequest(baseCR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +270,9 @@ func TestSign(t *testing.T) {
 			builder: &controllertest.Builder{
 				KubeObjects:        []runtime.Object{},
 				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents: []string{
+					"Normal WaitingForApproval Not signing CertificateRequest until it is Approved",
+				},
 			},
 		},
 		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
@@ -830,7 +823,7 @@ func runTest(t *testing.T, test testT) {
 	}
 
 	if test.fakeClient != nil {
-		v.clientBuilder = func(namespace string, secretsLister corelisters.SecretLister,
+		v.clientBuilder = func(namespace string, secretsLister internalinformers.SecretLister,
 			issuer cmapi.GenericIssuer, _ *metrics.Metrics, _ logr.Logger) (client.Interface, error) {
 			return test.fakeClient, nil
 		}
@@ -838,7 +831,7 @@ func runTest(t *testing.T, test testT) {
 
 	controller := certificaterequests.New(
 		apiutil.IssuerVenafi,
-		func(*controller.Context) certificaterequests.Issuer { return v },
+		func(*controllerpkg.Context) certificaterequests.Issuer { return v },
 	)
 	controller.Register(test.builder.Context)
 	test.builder.Start()

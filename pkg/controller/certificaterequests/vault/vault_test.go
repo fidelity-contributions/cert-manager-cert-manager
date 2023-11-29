@@ -22,8 +22,6 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -33,17 +31,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	internalvault "github.com/cert-manager/cert-manager/internal/vault"
 	fakevault "github.com/cert-manager/cert-manager/internal/vault/fake"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/pkg/controller"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
 	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
@@ -56,28 +54,19 @@ var (
 )
 
 func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
-	asn1Subj, _ := asn1.Marshal(pkix.Name{
-		CommonName: "test",
-	}.ToRDNSequence())
-	template := x509.CertificateRequest{
-		RawSubject:         asn1Subj,
-		SignatureAlgorithm: x509.SHA256WithRSA,
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, secretKey)
+	csr, err := gen.CSRWithSigner(secretKey,
+		gen.SetCSRCommonName("test"),
+	)
 	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		t.Fatal(err)
 	}
-
-	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	return csr
 }
 
 func generateSelfSignedCertFromCR(cr *cmapi.CertificateRequest, key crypto.Signer,
 	duration time.Duration) ([]byte, error) {
-	template, err := pki.GenerateTemplateFromCertificateRequest(cr)
+	template, err := pki.CertificateTemplateFromCertificateRequest(cr)
 	if err != nil {
 		return nil, fmt.Errorf("error generating template: %v", err)
 	}
@@ -99,7 +88,9 @@ func generateSelfSignedCertFromCR(cr *cmapi.CertificateRequest, key crypto.Signe
 func TestSign(t *testing.T) {
 	metaFixedClockStart := metav1.NewTime(fixedClockStart)
 	baseIssuer := gen.Issuer("vault-issuer",
-		gen.SetIssuerVault(cmapi.VaultIssuer{}),
+		gen.SetIssuerVault(cmapi.VaultIssuer{
+			Server: "https://example.vault.com",
+		}),
 		gen.AddIssuerCondition(cmapi.IssuerCondition{
 			Type:   cmapi.IssuerConditionReady,
 			Status: cmmeta.ConditionTrue,
@@ -175,6 +166,9 @@ func TestSign(t *testing.T) {
 			builder: &testpkg.Builder{
 				KubeObjects:        []runtime.Object{},
 				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents: []string{
+					"Normal WaitingForApproval Not signing CertificateRequest until it is Approved",
+				},
 			},
 		},
 		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
@@ -242,6 +236,7 @@ func TestSign(t *testing.T) {
 								},
 							},
 						},
+						Server: "https://example.vault.com",
 					})),
 				},
 				ExpectedEvents: []string{
@@ -282,6 +277,7 @@ func TestSign(t *testing.T) {
 								},
 							},
 						},
+						Server: "https://example.vault.com",
 					}),
 				)},
 				ExpectedEvents: []string{
@@ -526,7 +522,7 @@ func runTest(t *testing.T, test testT) {
 	vault := NewVault(test.builder.Context).(*Vault)
 
 	if test.fakeVault != nil {
-		vault.vaultClientBuilder = func(ns string, sl corelisters.SecretLister,
+		vault.vaultClientBuilder = func(ns string, _ func(ns string) internalvault.CreateToken, sl internalinformers.SecretLister,
 			iss cmapi.GenericIssuer) (internalvault.Interface, error) {
 			return test.fakeVault.New(ns, sl, iss)
 		}
@@ -534,7 +530,7 @@ func runTest(t *testing.T, test testT) {
 
 	controller := certificaterequests.New(
 		apiutil.IssuerVault,
-		func(*controller.Context) certificaterequests.Issuer { return vault },
+		func(*controllerpkg.Context) certificaterequests.Issuer { return vault },
 	)
 
 	if _, _, err := controller.Register(test.builder.Context); err != nil {

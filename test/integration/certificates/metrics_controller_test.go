@@ -32,13 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	fakeclock "k8s.io/utils/clock/testing"
 
+	"github.com/cert-manager/cert-manager/integration-tests/framework"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	controllermetrics "github.com/cert-manager/cert-manager/pkg/controller/certificates/metrics"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	"github.com/cert-manager/cert-manager/pkg/metrics"
-	"github.com/cert-manager/cert-manager/test/integration/framework"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -65,7 +65,7 @@ func TestMetricsController(t *testing.T) {
 	defer stopFn()
 
 	// Build, instantiate and run the issuing controller.
-	kubernetesCl, factory, cmClient, cmFactory := framework.NewClients(t, config)
+	kubernetesCl, factory, cmClient, cmFactory, scheme := framework.NewClients(t, config)
 
 	metricsHandler := metrics.New(logf.Log, fixedClock)
 
@@ -95,7 +95,15 @@ func TestMetricsController(t *testing.T) {
 		}
 	}()
 
-	ctrl, queue, mustSync := controllermetrics.NewController(factory, cmFactory, metricsHandler)
+	controllerContext := controllerpkg.Context{
+		Scheme:                    scheme,
+		KubeSharedInformerFactory: factory,
+		SharedInformerFactory:     cmFactory,
+		ContextOptions: controllerpkg.ContextOptions{
+			Metrics: metricsHandler,
+		},
+	}
+	ctrl, queue, mustSync := controllermetrics.NewController(&controllerContext)
 	c := controllerpkg.NewController(
 		ctx,
 		"metrics_test",
@@ -143,14 +151,14 @@ func TestMetricsController(t *testing.T) {
 	}
 
 	waitForMetrics := func(expectedOutput string) {
-		err := wait.PollImmediateUntil(time.Millisecond*100, func() (done bool, err error) {
+		err = wait.PollUntilContextCancel(ctx, time.Millisecond*100, true, func(ctx context.Context) (done bool, err error) {
 			if err := testMetrics(expectedOutput); err != nil {
 				lastErr = err
 				return false, nil
 			}
 
 			return true, nil
-		}, ctx.Done())
+		})
 		if err != nil {
 			t.Fatalf("%s: failed to wait for expected metrics to be exposed: %s", err, lastErr)
 		}
@@ -161,7 +169,7 @@ func TestMetricsController(t *testing.T) {
 
 	// Create Certificate
 	crt := gen.Certificate(crtName,
-		gen.SetCertificateIssuer(cmmeta.ObjectReference{Kind: "Issuer", Name: "test-issuer"}),
+		gen.SetCertificateIssuer(cmmeta.ObjectReference{Kind: "Issuer", Name: "test-issuer", Group: "test-issuer-group"}),
 		gen.SetCertificateSecretName(crtName),
 		gen.SetCertificateCommonName(crtName),
 		gen.SetCertificateNamespace(namespace),
@@ -176,15 +184,15 @@ func TestMetricsController(t *testing.T) {
 	// Should expose that Certificate as unknown with no expiry
 	waitForMetrics(`# HELP certmanager_certificate_expiration_timestamp_seconds The date after which the certificate expires. Expressed as a Unix Epoch Time.
 # TYPE certmanager_certificate_expiration_timestamp_seconds gauge
-certmanager_certificate_expiration_timestamp_seconds{name="testcrt",namespace="testns"} 0
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
 # HELP certmanager_certificate_ready_status The ready status of the certificate.
 # TYPE certmanager_certificate_ready_status gauge
-certmanager_certificate_ready_status{condition="False",name="testcrt",namespace="testns"} 0
-certmanager_certificate_ready_status{condition="True",name="testcrt",namespace="testns"} 0
-certmanager_certificate_ready_status{condition="Unknown",name="testcrt",namespace="testns"} 1
+certmanager_certificate_ready_status{condition="False",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
+certmanager_certificate_ready_status{condition="True",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 1
 # HELP certmanager_certificate_renewal_timestamp_seconds The number of seconds before expiration time the certificate should renew.
 # TYPE certmanager_certificate_renewal_timestamp_seconds gauge
-certmanager_certificate_renewal_timestamp_seconds{name="testcrt",namespace="testns"} 0
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
 ` + clockCounterMetric + clockGaugeMetric + `
 # HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller.
 # TYPE certmanager_controller_sync_call_count counter
@@ -212,15 +220,15 @@ certmanager_controller_sync_call_count{controller="metrics_test"} 1
 	// Should expose that Certificate as ready with expiry
 	waitForMetrics(`# HELP certmanager_certificate_expiration_timestamp_seconds The date after which the certificate expires. Expressed as a Unix Epoch Time.
 # TYPE certmanager_certificate_expiration_timestamp_seconds gauge
-certmanager_certificate_expiration_timestamp_seconds{name="testcrt",namespace="testns"} 100
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 100
 # HELP certmanager_certificate_ready_status The ready status of the certificate.
 # TYPE certmanager_certificate_ready_status gauge
-certmanager_certificate_ready_status{condition="False",name="testcrt",namespace="testns"} 0
-certmanager_certificate_ready_status{condition="True",name="testcrt",namespace="testns"} 1
-certmanager_certificate_ready_status{condition="Unknown",name="testcrt",namespace="testns"} 0
+certmanager_certificate_ready_status{condition="False",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
+certmanager_certificate_ready_status{condition="True",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 1
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 0
 # HELP certmanager_certificate_renewal_timestamp_seconds The number of seconds before expiration time the certificate should renew.
 # TYPE certmanager_certificate_renewal_timestamp_seconds gauge
-certmanager_certificate_renewal_timestamp_seconds{name="testcrt",namespace="testns"} 100
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="test-issuer-group",issuer_kind="Issuer",issuer_name="test-issuer",name="testcrt",namespace="testns"} 100
 ` + clockCounterMetric + clockGaugeMetric + `
 # HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller.
 # TYPE certmanager_controller_sync_call_count counter

@@ -17,6 +17,7 @@ limitations under the License.
 package vault
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -28,9 +29,13 @@ import (
 
 	vault "github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/helper/certutil"
-	corelisters "k8s.io/client-go/listers/core/v1"
+	authv1 "k8s.io/api/authentication/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
@@ -38,16 +43,13 @@ var _ Interface = &Vault{}
 
 // ClientBuilder is a function type that returns a new Interface.
 // Can be used in tests to create a mock signer of Vault certificate requests.
-type ClientBuilder func(namespace string, secretsLister corelisters.SecretLister,
-	issuer v1.GenericIssuer) (Interface, error)
+type ClientBuilder func(namespace string, _ func(ns string) CreateToken, _ internalinformers.SecretLister, _ v1.GenericIssuer) (Interface, error)
 
 // Interface implements various high level functionality related to connecting
 // with a Vault server, verifying its status and signing certificate request for
 // Vault's certificate.
-// TODO: Sys() is duplicated here and in Client interface
 type Interface interface {
 	Sign(csrPEM []byte, duration time.Duration) (certPEM []byte, caPEM []byte, err error)
-	Sys() *vault.Sys
 	IsVaultInitializedAndUnsealed() error
 }
 
@@ -56,26 +58,44 @@ type Client interface {
 	NewRequest(method, requestPath string) *vault.Request
 	RawRequest(r *vault.Request) (*vault.Response, error)
 	SetToken(v string)
-	Token() string
-	Sys() *vault.Sys
 }
+
+// For mocking purposes.
+type CreateToken func(ctx context.Context, saName string, req *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error)
 
 // Vault implements Interface and holds a Vault issuer, secrets lister and a
 // Vault client.
 type Vault struct {
-	secretsLister corelisters.SecretLister
+	createToken   CreateToken // Uses the same namespace as below.
+	secretsLister internalinformers.SecretLister
 	issuer        v1.GenericIssuer
 	namespace     string
 
+	// The pattern below, of namespaced and non-namespaced Vault clients, is copied from Hashicorp Nomad:
+	// https://github.com/hashicorp/nomad/blob/6e4410a9b13ce167bc7ef53da97c621b5c9dcd12/nomad/vault.go#L180-L190
+
+	// client is the Vault API client used for Namespace-relative integrations
+	// with the Vault API (anything except `/v1/sys`).
+	// The namespace feature is only available in Vault Enterprise.
+	// The namespace HTTP header (X-Vault-Namespace) is ignored by the open source version of Vault.
+	// See https://www.vaultproject.io/docs/enterprise/namespaces
 	client Client
+
+	// clientSys is the Vault API client used for non-Namespace-relative integrations
+	// with the Vault API (anything involving `/v1/sys`). This client is never configured
+	// with a Vault namespace, because these endpoints may return errors if a namespace
+	// header is provided
+	// See https://developer.hashicorp.com/vault/docs/enterprise/namespaces#root-only-api-paths
+	clientSys Client
 }
 
 // New returns a new Vault instance with the given namespace, issuer and
 // secrets lister.
 // Returned errors may be network failures and should be considered for
 // retrying.
-func New(namespace string, secretsLister corelisters.SecretLister, issuer v1.GenericIssuer) (Interface, error) {
+func New(namespace string, createTokenFn func(ns string) CreateToken, secretsLister internalinformers.SecretLister, issuer v1.GenericIssuer) (Interface, error) {
 	v := &Vault{
+		createToken:   createTokenFn(namespace),
 		secretsLister: secretsLister,
 		namespace:     namespace,
 		issuer:        issuer,
@@ -91,11 +111,26 @@ func New(namespace string, secretsLister corelisters.SecretLister, issuer v1.Gen
 		return nil, fmt.Errorf("error initializing Vault client: %s", err.Error())
 	}
 
-	if err := v.setToken(client); err != nil {
+	// Set the Vault namespace.
+	// An empty namespace string will cause the client to not send the namespace related HTTP headers to Vault.
+	clientNS := client.WithNamespace(issuer.GetSpec().Vault.Namespace)
+
+	// Use the (maybe) namespaced client to authenticate.
+	// If a Vault namespace is configured, then the authentication endpoints are
+	// expected to be in that namespace.
+	if err := v.setToken(clientNS); err != nil {
 		return nil, err
 	}
 
-	v.client = client
+	// A client for use with namespaced API paths
+	v.client = clientNS
+
+	// Create duplicate Vault client without a namespace, for interacting with root-only API paths.
+	// For backwards compatibility, this client will use the token from the namespaced client,
+	// although this is probably unnecessary / bad practice, since we only
+	// interact with the sys/health endpoint which is an unauthenticated endpoint:
+	// https://github.com/hashicorp/vault/issues/209#issuecomment-102485565.
+	v.clientSys = clientNS.WithNamespace("")
 
 	return v, nil
 }
@@ -123,8 +158,6 @@ func (v *Vault) Sign(csrPEM []byte, duration time.Duration) (cert []byte, ca []b
 
 	request := v.client.NewRequest("POST", url)
 
-	v.addVaultNamespaceToRequest(request)
-
 	if err := request.SetJSONBody(parameters); err != nil {
 		return nil, nil, fmt.Errorf("failed to build vault request: %s", err)
 	}
@@ -146,6 +179,13 @@ func (v *Vault) Sign(csrPEM []byte, duration time.Duration) (cert []byte, ca []b
 }
 
 func (v *Vault) setToken(client Client) error {
+	// IMPORTANT: Because of backwards compatibility with older versions that
+	// incorrectly allowed multiple authentication methods to be specified at
+	// the time of validation, we must still allow multiple authentication methods
+	// to be specified.
+	// In terms of implementation, we will use the first authentication method.
+	// The order of precedence is: tokenSecretRef, appRole, kubernetes
+
 	tokenRef := v.issuer.GetSpec().Vault.Auth.TokenSecretRef
 	if tokenRef != nil {
 		token, err := v.tokenRef(tokenRef.Name, v.namespace, tokenRef.Key)
@@ -172,7 +212,7 @@ func (v *Vault) setToken(client Client) error {
 	if kubernetesAuth != nil {
 		token, err := v.requestTokenWithKubernetesAuth(client, kubernetesAuth)
 		if err != nil {
-			return fmt.Errorf("error reading Kubernetes service account token from %s: %s", kubernetesAuth.SecretRef.Name, err.Error())
+			return fmt.Errorf("while requesting a Vault token using the Kubernetes auth: %w", err)
 		}
 		client.SetToken(token)
 		return nil
@@ -185,20 +225,63 @@ func (v *Vault) newConfig() (*vault.Config, error) {
 	cfg := vault.DefaultConfig()
 	cfg.Address = v.issuer.GetSpec().Vault.Server
 
-	certs := v.issuer.GetSpec().Vault.CABundle
-	if len(certs) == 0 {
+	caBundle, err := v.caBundle()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load vault CA bundle: %w", err)
+	}
+
+	// If no CA bundle was loaded, return early and don't modify the vault config
+	// further. This will cause the vault client to use the system root CA
+	// bundle.
+	if len(caBundle) == 0 {
 		return cfg, nil
 	}
 
 	caCertPool := x509.NewCertPool()
-	ok := caCertPool.AppendCertsFromPEM(certs)
+	ok := caCertPool.AppendCertsFromPEM(caBundle)
 	if !ok {
-		return nil, fmt.Errorf("error loading Vault CA bundle")
+		return nil, fmt.Errorf("no Vault CA bundles loaded, check bundle contents")
 	}
 
 	cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = caCertPool
 
 	return cfg, nil
+}
+
+// caBundle returns the CA bundle for the Vault server. Can be used in Vault
+// client configs to trust the connection to the Vault server. If no custom CA
+// bundle is configured, an empty byte slice is returned.
+// Assumes the in-line and Secret CA bundles are not both defined.
+// If the `key` of the Secret CA bundle is not defined, its value defaults to
+// `ca.crt`.
+func (v *Vault) caBundle() ([]byte, error) {
+	if len(v.issuer.GetSpec().Vault.CABundle) > 0 {
+		return v.issuer.GetSpec().Vault.CABundle, nil
+	}
+
+	ref := v.issuer.GetSpec().Vault.CABundleSecretRef
+	if ref == nil {
+		return nil, nil
+	}
+
+	secret, err := v.secretsLister.Secrets(v.namespace).Get(ref.Name)
+	if err != nil {
+		return nil, fmt.Errorf("could not access secret '%s/%s': %s", v.namespace, ref.Name, err)
+	}
+
+	var key string
+	if ref.Key != "" {
+		key = ref.Key
+	} else {
+		key = cmmeta.TLSCAKey
+	}
+
+	certBytes, ok := secret.Data[key]
+	if !ok {
+		return nil, fmt.Errorf("no data for %q in secret '%s/%s'", key, v.namespace, ref.Name)
+	}
+
+	return certBytes, nil
 }
 
 func (v *Vault) tokenRef(name, namespace, key string) (string, error) {
@@ -268,8 +351,6 @@ func (v *Vault) requestTokenWithAppRoleRef(client Client, appRole *v1.VaultAppRo
 		return "", fmt.Errorf("error encoding Vault parameters: %s", err.Error())
 	}
 
-	v.addVaultNamespaceToRequest(request)
-
 	resp, err := client.RawRequest(request)
 	if err != nil {
 		return "", fmt.Errorf("error logging in to Vault server: %s", err.Error())
@@ -295,22 +376,56 @@ func (v *Vault) requestTokenWithAppRoleRef(client Client, appRole *v1.VaultAppRo
 }
 
 func (v *Vault) requestTokenWithKubernetesAuth(client Client, kubernetesAuth *v1.VaultKubernetesAuth) (string, error) {
-	secret, err := v.secretsLister.Secrets(v.namespace).Get(kubernetesAuth.SecretRef.Name)
-	if err != nil {
-		return "", err
-	}
+	var jwt string
+	switch {
+	case kubernetesAuth.SecretRef.Name != "":
+		secret, err := v.secretsLister.Secrets(v.namespace).Get(kubernetesAuth.SecretRef.Name)
+		if err != nil {
+			return "", err
+		}
 
-	key := kubernetesAuth.SecretRef.Key
-	if key == "" {
-		key = v1.DefaultVaultTokenAuthSecretKey
-	}
+		key := kubernetesAuth.SecretRef.Key
+		if key == "" {
+			key = v1.DefaultVaultTokenAuthSecretKey
+		}
 
-	keyBytes, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("no data for %q in secret '%s/%s'", key, v.namespace, kubernetesAuth.SecretRef.Name)
-	}
+		keyBytes, ok := secret.Data[key]
+		if !ok {
+			return "", fmt.Errorf("no data for %q in secret '%s/%s'", key, v.namespace, kubernetesAuth.SecretRef.Name)
+		}
 
-	jwt := string(keyBytes)
+		jwt = string(keyBytes)
+
+	case kubernetesAuth.ServiceAccountRef != nil:
+		aud := "vault://"
+		if v.issuer.GetNamespace() != "" {
+			aud += v.issuer.GetNamespace() + "/"
+		}
+		aud += v.issuer.GetName()
+
+		tokenrequest, err := v.createToken(context.Background(), kubernetesAuth.ServiceAccountRef.Name, &authv1.TokenRequest{
+			Spec: authv1.TokenRequestSpec{
+				// The audience is generated by cert-manager and can't be
+				// configured by the user for security reasons. The format is:
+				//   "vault://<namespace>/<issuer-name>"   (for an Issuer)
+				//   "vault://<issuer-name>"               (for a ClusterIssuer)
+				Audiences: []string{aud},
+
+				// Since the JWT is only used to authenticate with Vault and is
+				// immediately discarded, let's use the minimal duration
+				// possible. 10 minutes is the minimum allowed by the Kubernetes
+				// API.
+				ExpirationSeconds: ptr.To(int64(600)),
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			return "", fmt.Errorf("while requesting a token for the service account %s/%s: %s", v.issuer.GetNamespace(), kubernetesAuth.ServiceAccountRef.Name, err.Error())
+		}
+
+		jwt = tokenrequest.Status.Token
+	default:
+		return "", fmt.Errorf("programmer mistake: both serviceAccountRef and tokenRef.name are empty")
+	}
 
 	parameters := map[string]string{
 		"role": kubernetesAuth.Role,
@@ -324,12 +439,10 @@ func (v *Vault) requestTokenWithKubernetesAuth(client Client, kubernetesAuth *v1
 
 	url := filepath.Join(mountPath, "login")
 	request := client.NewRequest("POST", url)
-	err = request.SetJSONBody(parameters)
+	err := request.SetJSONBody(parameters)
 	if err != nil {
 		return "", fmt.Errorf("error encoding Vault parameters: %s", err.Error())
 	}
-
-	v.addVaultNamespaceToRequest(request)
 
 	resp, err := client.RawRequest(request)
 	if err != nil {
@@ -349,10 +462,6 @@ func (v *Vault) requestTokenWithKubernetesAuth(client Client, kubernetesAuth *v1
 	}
 
 	return token, nil
-}
-
-func (v *Vault) Sys() *vault.Sys {
-	return v.client.Sys()
 }
 
 func extractCertificatesFromVaultCertificateSecret(secret *certutil.Secret) ([]byte, []byte, error) {
@@ -381,39 +490,33 @@ func extractCertificatesFromVaultCertificateSecret(secret *certutil.Secret) ([]b
 
 func (v *Vault) IsVaultInitializedAndUnsealed() error {
 	healthURL := path.Join("/v1", "sys", "health")
-	healthRequest := v.client.NewRequest("GET", healthURL)
-	healthResp, err := v.client.RawRequest(healthRequest)
+	healthRequest := v.clientSys.NewRequest("GET", healthURL)
+	healthResp, err := v.clientSys.RawRequest(healthRequest)
 
 	if healthResp != nil {
 		defer healthResp.Body.Close()
 	}
 
+	// 200 = if initialized, unsealed, and active
 	// 429 = if unsealed and standby
 	// 472 = if disaster recovery mode replication secondary and active
 	// 473 = if performance standby
+	// 501 = if not initialized
+	// 503 = if sealed
 	if err != nil {
 		switch {
 		case healthResp == nil:
 			return err
 		case healthResp.StatusCode == 429, healthResp.StatusCode == 472, healthResp.StatusCode == 473:
 			return nil
+		case healthResp.StatusCode == 501:
+			return fmt.Errorf("Vault is not initialized")
+		case healthResp.StatusCode == 503:
+			return fmt.Errorf("Vault is sealed")
 		default:
 			return fmt.Errorf("error calling Vault %s: %w", healthURL, err)
 		}
 	}
 
 	return nil
-}
-
-func (v *Vault) addVaultNamespaceToRequest(request *vault.Request) {
-	vaultIssuer := v.issuer.GetSpec().Vault
-	if vaultIssuer != nil && vaultIssuer.Namespace != "" {
-		if request.Headers != nil {
-			request.Headers.Add("X-VAULT-NAMESPACE", vaultIssuer.Namespace)
-		} else {
-			vaultReqHeaders := http.Header{}
-			vaultReqHeaders.Add("X-VAULT-NAMESPACE", vaultIssuer.Namespace)
-			request.Headers = vaultReqHeaders
-		}
-	}
 }

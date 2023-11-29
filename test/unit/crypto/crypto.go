@@ -30,7 +30,6 @@ import (
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
@@ -74,14 +73,14 @@ type CryptoBundle struct {
 
 // MustCreateCryptoBundle creates a CryptoBundle to be used with tests or fails.
 func MustCreateCryptoBundle(t *testing.T, crt *cmapi.Certificate, clock clock.Clock) CryptoBundle {
-	c, err := createCryptoBundle(crt, clock)
+	c, err := CreateCryptoBundle(crt, clock)
 	if err != nil {
 		t.Fatalf("error generating crypto bundle: %v", err)
 	}
 	return *c
 }
 
-func createCryptoBundle(originalCert *cmapi.Certificate, clock clock.Clock) (*CryptoBundle, error) {
+func CreateCryptoBundle(originalCert *cmapi.Certificate, clock clock.Clock) (*CryptoBundle, error) {
 	crt := originalCert.DeepCopy()
 	if crt.Spec.PrivateKey == nil {
 		crt.Spec.PrivateKey = &cmapi.CertificatePrivateKey{}
@@ -136,7 +135,7 @@ func createCryptoBundle(originalCert *cmapi.Certificate, clock clock.Clock) (*Cr
 		},
 	}
 
-	unsignedCert, err := pki.GenerateTemplateFromCertificateRequest(certificateRequest)
+	unsignedCert, err := pki.CertificateTemplateFromCertificateRequest(certificateRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +178,7 @@ func createCryptoBundle(originalCert *cmapi.Certificate, clock clock.Clock) (*Cr
 		}),
 	)
 
-	tempCertBytes, err := certificates.GenerateLocallySignedTemporaryCertificate(crt, privateKeyBytes)
+	tempCertBytes, err := pki.GenerateLocallySignedTemporaryCertificate(crt, privateKeyBytes)
 	if err != nil {
 		panic("failed to generate test fixture: " + err.Error())
 	}
@@ -256,7 +255,7 @@ func MustCreateCertWithNotBeforeAfter(t *testing.T, pkData []byte, spec *cmapi.C
 		t.Fatal(err)
 	}
 
-	template, err := pki.GenerateTemplate(spec)
+	template, err := pki.CertificateTemplateFromCertificate(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +278,7 @@ func MustCreateCert(t *testing.T, pkData []byte, spec *cmapi.Certificate) []byte
 		t.Fatal(err)
 	}
 
-	template, err := pki.GenerateTemplate(spec)
+	template, err := pki.CertificateTemplateFromCertificate(spec)
 	if err != nil {
 		t.Fatal(err)
 	}

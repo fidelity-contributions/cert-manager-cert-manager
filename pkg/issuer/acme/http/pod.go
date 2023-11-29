@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
@@ -47,35 +47,36 @@ func podLabels(ch *cmacme.Challenge) map[string]string {
 	}
 }
 
-func (s *Solver) ensurePod(ctx context.Context, ch *cmacme.Challenge) (*corev1.Pod, error) {
+func (s *Solver) ensurePod(ctx context.Context, ch *cmacme.Challenge) error {
 	log := logf.FromContext(ctx).WithName("ensurePod")
 
 	log.V(logf.DebugLevel).Info("checking for existing HTTP01 solver pods")
 	existingPods, err := s.getPodsForChallenge(ctx, ch)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(existingPods) == 1 {
 		logf.WithRelatedResource(log, existingPods[0]).Info("found one existing HTTP01 solver pod")
-		return existingPods[0], nil
+		return nil
 	}
 	if len(existingPods) > 1 {
 		log.V(logf.InfoLevel).Info("multiple challenge solver pods found for challenge. cleaning up all existing pods.")
 		err := s.cleanupPods(ctx, ch)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return nil, fmt.Errorf("multiple existing challenge solver pods found and cleaned up. retrying challenge sync")
+		return fmt.Errorf("multiple existing challenge solver pods found and cleaned up. retrying challenge sync")
 	}
 
 	log.V(logf.InfoLevel).Info("creating HTTP01 challenge solver pod")
 
-	return s.createPod(ctx, ch)
+	_, err = s.createPod(ctx, ch)
+	return err
 }
 
 // getPodsForChallenge returns a list of pods that were created to solve
 // the given challenge
-func (s *Solver) getPodsForChallenge(ctx context.Context, ch *cmacme.Challenge) ([]*corev1.Pod, error) {
+func (s *Solver) getPodsForChallenge(ctx context.Context, ch *cmacme.Challenge) ([]*metav1.PartialObjectMetadata, error) {
 	log := logf.FromContext(ctx)
 
 	podLabels := podLabels(ch)
@@ -88,19 +89,23 @@ func (s *Solver) getPodsForChallenge(ctx context.Context, ch *cmacme.Challenge) 
 		orderSelector = orderSelector.Add(*req)
 	}
 
-	podList, err := s.podLister.Pods(ch.Namespace).List(orderSelector)
+	podMetadataList, err := s.podLister.ByNamespace(ch.Namespace).List(orderSelector)
 	if err != nil {
 		return nil, err
 	}
 
-	var relevantPods []*corev1.Pod
-	for _, pod := range podList {
-		if !metav1.IsControlledBy(pod, ch) {
-			logf.WithRelatedResource(log, pod).Info("found existing solver pod for this challenge resource, however " +
+	var relevantPods []*metav1.PartialObjectMetadata
+	for _, pod := range podMetadataList {
+		p, ok := pod.(*metav1.PartialObjectMetadata)
+		if !ok {
+			return nil, fmt.Errorf("internal error: cannot cast PartialMetadata: %+#v", pod)
+		}
+		if !metav1.IsControlledBy(p, ch) {
+			logf.WithRelatedResource(log, p).Info("found existing solver pod for this challenge resource, however " +
 				"it does not have an appropriate OwnerReference referencing this challenge. Skipping it altogether.")
 			continue
 		}
-		relevantPods = append(relevantPods, pod)
+		relevantPods = append(relevantPods, p)
 	}
 
 	return relevantPods, nil
@@ -111,7 +116,7 @@ func (s *Solver) cleanupPods(ctx context.Context, ch *cmacme.Challenge) error {
 
 	pods, err := s.getPodsForChallenge(ctx, ch)
 	if err != nil {
-		return err
+		return fmt.Errorf("error retrieving pods for cleanup: %w", err)
 	}
 	var errs []error
 	for _, pod := range pods {
@@ -121,7 +126,7 @@ func (s *Solver) cleanupPods(ctx context.Context, ch *cmacme.Challenge) error {
 		err := s.Client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
 		if err != nil {
 			log.V(logf.WarnLevel).Info("failed to delete pod resource", "error", err)
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("error deleting pod: %w", err))
 			continue
 		}
 		log.V(logf.InfoLevel).Info("successfully deleted pod resource")
@@ -155,6 +160,12 @@ func (s *Solver) buildPod(ch *cmacme.Challenge) *corev1.Pod {
 	return pod
 }
 
+// Note: this function builds pod spec using defaults and any configuration
+// options passed via flags to cert-manager controller.
+// Solver pod configuration via flags is a now deprecated
+// mechanism- please use pod template instead when adding any new
+// configuration options
+// https://github.com/cert-manager/cert-manager/blob/f1d7c432763100c3fb6eb6a1654d29060b479b3c/pkg/apis/acme/v1/types_issuer.go#L270
 func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 	podLabels := podLabels(ch)
 
@@ -164,26 +175,32 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 			Namespace:    ch.Namespace,
 			Labels:       podLabels,
 			Annotations: map[string]string{
-				"sidecar.istio.io/inject": "false",
+				"sidecar.istio.io/inject":                        "false",
+				"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
 			},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ch, challengeGvk)},
 		},
 		Spec: corev1.PodSpec{
+			// The HTTP01 solver process does not need access to the
+			// Kubernetes API server, so we turn off automounting of
+			// the Kubernetes ServiceAccount token.
+			// See https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting
+			AutomountServiceAccountToken: ptr.To(false),
 			NodeSelector: map[string]string{
 				"kubernetes.io/os": "linux",
 			},
-			RestartPolicy: corev1.RestartPolicyOnFailure,
+			RestartPolicy:      corev1.RestartPolicyOnFailure,
+			EnableServiceLinks: ptr.To(false),
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: pointer.BoolPtr(true),
+				RunAsNonRoot: ptr.To(s.ACMEOptions.ACMEHTTP01SolverRunAsNonRoot),
 				SeccompProfile: &corev1.SeccompProfile{
 					Type: corev1.SeccompProfileTypeRuntimeDefault,
 				},
 			},
 			Containers: []corev1.Container{
 				{
-					Name: "acmesolver",
-					// TODO: use an image as specified as a config option
-					Image:           s.Context.HTTP01SolverImage,
+					Name:            "acmesolver",
+					Image:           s.ACMEOptions.HTTP01SolverImage,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 					// TODO: replace this with some kind of cmdline generator
 					Args: []string{
@@ -209,7 +226,8 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						AllowPrivilegeEscalation: pointer.BoolPtr(false),
+						ReadOnlyRootFilesystem:   ptr.To(true),
+						AllowPrivilegeEscalation: ptr.To(false),
 						Capabilities: &corev1.Capabilities{
 							Drop: []corev1.Capability{"ALL"},
 						},
@@ -267,6 +285,12 @@ func (s *Solver) mergePodObjectMetaWithPodTemplate(pod *corev1.Pod, podTempl *cm
 	if podTempl.Spec.ServiceAccountName != "" {
 		pod.Spec.ServiceAccountName = podTempl.Spec.ServiceAccountName
 	}
+
+	if pod.Spec.ImagePullSecrets == nil {
+		pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{}
+	}
+
+	pod.Spec.ImagePullSecrets = append(pod.Spec.ImagePullSecrets, podTempl.Spec.ImagePullSecrets...)
 
 	return pod
 }

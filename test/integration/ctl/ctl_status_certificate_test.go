@@ -18,11 +18,6 @@ package ctl
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
-	"encoding/pem"
 	"fmt"
 	"regexp"
 	"strings"
@@ -38,6 +33,7 @@ import (
 
 	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/factory"
 	statuscertcmd "github.com/cert-manager/cert-manager/cmd/ctl/pkg/status/certificate"
+	"github.com/cert-manager/cert-manager/integration-tests/framework"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -45,7 +41,6 @@ import (
 	"github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	"github.com/cert-manager/cert-manager/pkg/ctl"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/integration/framework"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -54,19 +49,13 @@ func generateCSR(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	asn1Subj, _ := asn1.Marshal(pkix.Name{
-		CommonName: "test",
-	}.ToRDNSequence())
-	template := x509.CertificateRequest{
-		RawSubject: asn1Subj,
-	}
 
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, skRSA)
+	csr, err := gen.CSRWithSigner(skRSA,
+		gen.SetCSRCommonName("test"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	return csr
 }
@@ -81,7 +70,7 @@ func TestCtlStatusCert(t *testing.T) {
 	defer stopFn()
 
 	// Build clients
-	kubernetesCl, _, cmCl, _ := framework.NewClients(t, config)
+	kubernetesCl, _, cmCl, _, _ := framework.NewClients(t, config)
 
 	var (
 		crt1Name  = "testcrt-1"

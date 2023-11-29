@@ -18,17 +18,15 @@ package vault
 
 import (
 	"bytes"
+	"context"
 	"crypto"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -36,10 +34,16 @@ import (
 	vault "github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/helper/certutil"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientcorev1 "k8s.io/client-go/listers/core/v1"
 
 	vaultfake "github.com/cert-manager/cert-manager/internal/vault/fake"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
@@ -156,21 +160,12 @@ func generateRSAPrivateKey(t *testing.T) *rsa.PrivateKey {
 }
 
 func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
-	asn1Subj, _ := asn1.Marshal(pkix.Name{
-		CommonName: "test",
-	}.ToRDNSequence())
-	template := x509.CertificateRequest{
-		RawSubject:         asn1Subj,
-		SignatureAlgorithm: x509.SHA256WithRSA,
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, secretKey)
+	csr, err := gen.CSRWithSigner(secretKey,
+		gen.SetCSRCommonName("test"),
+	)
 	if err != nil {
-		t.Errorf("failed to create CSR: %s", err)
-		t.FailNow()
+		t.Fatal(err)
 	}
-
-	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 	return csr
 }
@@ -178,7 +173,7 @@ func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
 type testSignT struct {
 	issuer     *cmapi.Issuer
 	fakeLister *listers.FakeSecretLister
-	fakeClient *vaultfake.Client
+	fakeClient *vaultfake.FakeClient
 
 	csrPEM       []byte
 	expectedErr  error
@@ -371,15 +366,6 @@ func TestExtractCertificatesFromVaultCertificateSecret(t *testing.T) {
 	}
 }
 
-type testSetTokenT struct {
-	expectedToken string
-	expectedErr   error
-
-	issuer     *cmapi.Issuer
-	fakeLister *listers.FakeSecretLister
-	fakeClient *vaultfake.Client
-}
-
 func TestSetToken(t *testing.T) {
 	tokenSecret := &corev1.Secret{
 		Data: map[string][]byte{
@@ -398,7 +384,16 @@ func TestSetToken(t *testing.T) {
 			"my-kube-key": []byte("my-secret-kube-token"),
 		},
 	}
-	tests := map[string]testSetTokenT{
+	tests := map[string]struct {
+		expectedToken string
+		expectedErr   error
+
+		issuer          cmapi.GenericIssuer
+		fakeLister      *listers.FakeSecretLister
+		mockCreateToken func(t *testing.T) CreateToken
+
+		fakeClient *vaultfake.FakeClient
+	}{
 		"if neither token secret ref, app role secret ref, or kube auth then not found then error": {
 			issuer: gen.Issuer("vault-issuer",
 				gen.SetIssuerVault(cmapi.VaultIssuer{
@@ -407,7 +402,6 @@ func TestSetToken(t *testing.T) {
 				}),
 			),
 			fakeLister:    listers.FakeSecretListerFrom(listers.NewFakeSecretLister()),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr: errors.New(
 				"error initializing Vault client: tokenSecretRef, appRoleSecretRef, or Kubernetes auth role not set",
@@ -430,7 +424,6 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret does not exists")),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("secret does not exists"),
 		},
@@ -452,7 +445,7 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(tokenSecret, nil),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
+
 			expectedToken: "my-secret-token",
 			expectedErr:   nil,
 		},
@@ -477,7 +470,6 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret not found")),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("secret not found"),
 		},
@@ -534,7 +526,6 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret does not exists")),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("error reading Kubernetes service account token from secret-ref-name: secret does not exists"),
 		},
@@ -559,7 +550,6 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(&corev1.Secret{}, nil),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New(`error reading Kubernetes service account token from secret-ref-name: no data for "my-kube-key" in secret 'test-namespace/secret-ref-name'`),
 		},
@@ -621,7 +611,7 @@ func TestSetToken(t *testing.T) {
 			expectedErr:   nil,
 		},
 
-		"if app role secret ref and token secret set, take preference on token secret": {
+		"if appRole.secretRef, tokenSecretRef set, take preference on tokenSecretRef": {
 			issuer: gen.Issuer("vault-issuer",
 				gen.SetIssuerVault(cmapi.VaultIssuer{
 					CABundle: []byte(testLeafCertificate),
@@ -647,17 +637,101 @@ func TestSetToken(t *testing.T) {
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(tokenSecret, nil),
 			),
-			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "my-secret-token",
+			expectedErr:   nil,
+		},
+
+		"if kubernetes.serviceAccountRef set, request token and exchange it for a vault token (Issuer)": {
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					CABundle: []byte(testLeafCertificate),
+					Auth: cmapi.VaultAuth{
+						Kubernetes: &cmapi.VaultKubernetesAuth{
+							Role: "kube-vault-role",
+							ServiceAccountRef: &v1.ServiceAccountRef{
+								Name: "my-service-account",
+							},
+							Path: "my-path",
+						},
+					},
+				}),
+			),
+			mockCreateToken: func(t *testing.T) CreateToken {
+				return func(_ context.Context, saName string, req *authv1.TokenRequest, _ metav1.CreateOptions) (*authv1.TokenRequest, error) {
+					assert.Equal(t, "my-service-account", saName)
+					assert.Equal(t, "vault://default-unit-test-ns/vault-issuer", req.Spec.Audiences[0])
+					assert.Equal(t, int64(600), *req.Spec.ExpirationSeconds)
+					return &authv1.TokenRequest{Status: authv1.TokenRequestStatus{
+						Token: "kube-sa-token",
+					}}, nil
+				}
+			},
+			fakeClient: vaultfake.NewFakeClient().WithRawRequestFn(func(t *testing.T, req *vault.Request) (*vault.Response, error) {
+				// Vault exhanges the Kubernetes token with a Vault token.
+				assert.Equal(t, "kube-sa-token", req.Obj.(map[string]string)["jwt"])
+				assert.Equal(t, "kube-vault-role", req.Obj.(map[string]string)["role"])
+				return &vault.Response{Response: &http.Response{Body: io.NopCloser(strings.NewReader(
+					`{"request_id":"","lease_id":"","lease_duration":0,"renewable":false,"data":null,"warnings":null,"data":{"id":"vault-token"}}`,
+				))}}, nil
+			}),
+			expectedToken: "vault-token",
+			expectedErr:   nil,
+		},
+
+		"if kubernetes.serviceAccountRef set, request token and exchange it for a vault token (ClusterIssuer)": {
+			issuer: gen.ClusterIssuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					CABundle: []byte(testLeafCertificate),
+					Auth: cmapi.VaultAuth{
+						Kubernetes: &cmapi.VaultKubernetesAuth{
+							Role: "kube-vault-role",
+							ServiceAccountRef: &v1.ServiceAccountRef{
+								Name: "my-service-account",
+							},
+							Path: "my-path",
+						},
+					},
+				}),
+			),
+			mockCreateToken: func(t *testing.T) CreateToken {
+				return func(_ context.Context, saName string, req *authv1.TokenRequest, _ metav1.CreateOptions) (*authv1.TokenRequest, error) {
+					assert.Equal(t, "my-service-account", saName)
+					assert.Equal(t, "vault://vault-issuer", req.Spec.Audiences[0])
+					assert.Equal(t, int64(600), *req.Spec.ExpirationSeconds)
+					return &authv1.TokenRequest{Status: authv1.TokenRequestStatus{
+						Token: "kube-sa-token",
+					}}, nil
+				}
+			},
+			fakeClient: vaultfake.NewFakeClient().WithRawRequestFn(func(t *testing.T, req *vault.Request) (*vault.Response, error) {
+				// Vault exhanges the Kubernetes token with a Vault token.
+				assert.Equal(t, "kube-sa-token", req.Obj.(map[string]string)["jwt"])
+				assert.Equal(t, "kube-vault-role", req.Obj.(map[string]string)["role"])
+				return &vault.Response{Response: &http.Response{Body: io.NopCloser(strings.NewReader(
+					`{"request_id":"","lease_id":"","lease_duration":0,"renewable":false,"data":null,"warnings":null,"data":{"id":"vault-token"}}`,
+				))}}, nil
+			}),
+			expectedToken: "vault-token",
 			expectedErr:   nil,
 		},
 	}
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
+			if test.fakeClient == nil {
+				test.fakeClient = &vaultfake.FakeClient{T: t}
+			} else {
+				test.fakeClient.T = t
+			}
+			var mockCreateToken CreateToken
+			if test.mockCreateToken != nil {
+				mockCreateToken = test.mockCreateToken(t)
+			}
+
 			v := &Vault{
 				namespace:     "test-namespace",
 				secretsLister: test.fakeLister,
+				createToken:   mockCreateToken,
 				issuer:        test.issuer,
 			}
 
@@ -669,9 +743,9 @@ func TestSetToken(t *testing.T) {
 					test.expectedErr, err)
 			}
 
-			if test.fakeClient.Token() != test.expectedToken {
+			if test.fakeClient.GotToken != test.expectedToken {
 				t.Errorf("got unexpected client token, exp=%s got=%s",
-					test.expectedToken, test.fakeClient.Token())
+					test.expectedToken, test.fakeClient.GotToken)
 			}
 		})
 	}
@@ -878,10 +952,30 @@ func TestTokenRef(t *testing.T) {
 type testNewConfigT struct {
 	expectedErr error
 	issuer      *cmapi.Issuer
-	checkFunc   func(cfg *vault.Config) error
+	checkFunc   func(cfg *vault.Config, err error) error
+
+	fakeLister      *listers.FakeSecretLister
+	fakeCreateToken func(t *testing.T) CreateToken
 }
 
 func TestNewConfig(t *testing.T) {
+	caBundleSecretRefFakeSecretLister := func(namespace, secret, key, cert string) *listers.FakeSecretLister {
+		return listers.FakeSecretListerFrom(listers.NewFakeSecretLister(), func(f *listers.FakeSecretLister) {
+			f.SecretsFn = func(namespace string) clientcorev1.SecretNamespaceLister {
+				return listers.FakeSecretNamespaceListerFrom(listers.NewFakeSecretNamespaceLister(), func(fn *listers.FakeSecretNamespaceLister) {
+					fn.GetFn = func(name string) (*corev1.Secret, error) {
+						if name == secret && namespace == namespace {
+							return &corev1.Secret{
+								Data: map[string][]byte{
+									key: []byte(cert),
+								}}, nil
+						}
+						return nil, errors.New("unexpected secret name or namespace passed to FakeSecretLister")
+					}
+				})
+			}
+		})
+	}
 	tests := map[string]testNewConfigT{
 		"no CA bundle set in issuer should return nil": {
 			issuer: gen.Issuer("vault-issuer",
@@ -895,20 +989,22 @@ func TestNewConfig(t *testing.T) {
 		"a bad cert bundle should error": {
 			issuer: gen.Issuer("vault-issuer",
 				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server:   "https://vault.example.com",
 					CABundle: []byte("a bad cert bundle"),
 				}),
 			),
-			expectedErr: errors.New("error loading Vault CA bundle"),
+			expectedErr: errors.New("no Vault CA bundles loaded, check bundle contents"),
 		},
 
 		"a good cert bundle should be added to the config": {
 			issuer: gen.Issuer("vault-issuer",
 				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server:   "https://vault.example.com",
 					CABundle: []byte(testLeafCertificate),
 				}),
 			),
 			expectedErr: nil,
-			checkFunc: func(cfg *vault.Config) error {
+			checkFunc: func(cfg *vault.Config, error error) error {
 				testCA := x509.NewCertPool()
 				testCA.AppendCertsFromPEM([]byte(testLeafCertificate))
 				subs := cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs.Subjects()
@@ -927,26 +1023,133 @@ func TestNewConfig(t *testing.T) {
 				return nil
 			},
 		},
+
+		"a good bundle from a caBundleSecretRef should be added to the config": {
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server: "https://vault.example.com",
+					CABundleSecretRef: &cmmeta.SecretKeySelector{
+						Key: "my-bundle.crt",
+						LocalObjectReference: cmmeta.LocalObjectReference{
+							Name: "bundle",
+						},
+					},
+				},
+				)),
+			checkFunc: func(cfg *vault.Config, error error) error {
+				if error != nil {
+					return error
+				}
+
+				testCA := x509.NewCertPool()
+				testCA.AppendCertsFromPEM([]byte(testLeafCertificate))
+				subs := cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs.Subjects()
+
+				err := fmt.Errorf("got unexpected root CAs in config, exp=%s got=%s",
+					testCA.Subjects(), subs)
+				if len(subs) != len(testCA.Subjects()) {
+					return err
+				}
+				for i := range subs {
+					if !bytes.Equal(subs[i], testCA.Subjects()[i]) {
+						return err
+					}
+				}
+
+				return nil
+			},
+			fakeLister: caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "my-bundle.crt", testLeafCertificate),
+		},
+		"a good bundle from a caBundleSecretRef with default key should be added to the config": {
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server: "https://vault.example.com",
+					CABundleSecretRef: &cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{
+							Name: "bundle",
+						},
+					},
+				},
+				)),
+			checkFunc: func(cfg *vault.Config, error error) error {
+				if error != nil {
+					return error
+				}
+
+				testCA := x509.NewCertPool()
+				testCA.AppendCertsFromPEM([]byte(testLeafCertificate))
+				subs := cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs.Subjects()
+
+				err := fmt.Errorf("got unexpected root CAs in config, exp=%s got=%s",
+					testCA.Subjects(), subs)
+				if len(subs) != len(testCA.Subjects()) {
+					return err
+				}
+				for i := range subs {
+					if !bytes.Equal(subs[i], testCA.Subjects()[i]) {
+						return err
+					}
+				}
+
+				return nil
+			},
+			fakeLister: caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "ca.crt", testLeafCertificate),
+		},
+		"a bad bundle from a caBundleSecretRef should error": {
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server: "https://vault.example.com",
+					CABundleSecretRef: &cmmeta.SecretKeySelector{
+						Key: "my-bundle.crt",
+						LocalObjectReference: cmmeta.LocalObjectReference{
+							Name: "bundle",
+						},
+					},
+				},
+				)),
+			expectedErr: errors.New("no Vault CA bundles loaded, check bundle contents"),
+			fakeLister:  caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "my-bundle.crt", "not a valid certificate"),
+		},
+		"the tokenCreate func should be called with the correct namespace": {
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapi.VaultIssuer{
+					Server: "https://vault.example.com",
+					Path:   "my-path",
+					Auth: cmapi.VaultAuth{
+						Kubernetes: &cmapi.VaultKubernetesAuth{
+							Role: "my-role",
+							ServiceAccountRef: &v1.ServiceAccountRef{
+								Name: "my-sa",
+							},
+						},
+					}})),
+			fakeCreateToken: func(t *testing.T) CreateToken {
+				return func(_ context.Context, saName string, req *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
+					assert.Equal(t, "test-namespace", req.Namespace)
+					assert.Equal(t, "my-sa", saName)
+					return &authv1.TokenRequest{Status: authv1.TokenRequestStatus{
+						Token: "foo",
+					}}, nil
+				}
+			},
+		},
 	}
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			v := &Vault{
 				namespace:     "test-namespace",
-				secretsLister: nil,
+				secretsLister: test.fakeLister,
 				issuer:        test.issuer,
 			}
 
 			cfg, err := v.newConfig()
-			if ((test.expectedErr == nil) != (err == nil)) &&
-				test.expectedErr != nil &&
-				test.expectedErr.Error() != err.Error() {
-				t.Errorf("unexpected error, exp=%v got=%v",
-					test.expectedErr, err)
+			if test.expectedErr != nil && err != nil && test.expectedErr.Error() != err.Error() {
+				t.Errorf("unexpected error, exp=%v got=%v", test.expectedErr, err)
 			}
 
 			if test.checkFunc != nil {
-				if err := test.checkFunc(cfg); err != nil {
+				if err := test.checkFunc(cfg, err); err != nil {
 					t.Errorf("check function failed: %s", err)
 				}
 			}
@@ -986,7 +1189,6 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 
 	tests := map[string]requestTokenWithAppRoleRefT{
 		"a secret reference that does not exist should error": {
-			client:  vaultfake.NewFakeClient(),
 			appRole: basicAppRoleRef,
 			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
 				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret not found")),
@@ -1080,4 +1282,190 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewWithVaultNamespaces demonstrates that New initializes two Vault
+// clients, one with a namespace and one without a namespace which is used for
+// interacting with root-only APIs.
+func TestNewWithVaultNamespaces(t *testing.T) {
+	type testCase struct {
+		name    string
+		vaultNS string
+	}
+
+	tests := []testCase{
+		{
+			name:    "without-namespace",
+			vaultNS: "",
+		},
+		{
+			name:    "with-namespace",
+			vaultNS: "vault-ns-1",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(
+				"k8s-ns1",
+				func(ns string) CreateToken { return nil },
+				listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
+					listers.SetFakeSecretNamespaceListerGet(
+						&corev1.Secret{
+							Data: map[string][]byte{
+								"key1": []byte("not-used"),
+							},
+						}, nil),
+				),
+				&cmapi.Issuer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "issuer1",
+						Namespace: "k8s-ns1",
+					},
+					Spec: v1.IssuerSpec{
+						IssuerConfig: v1.IssuerConfig{
+							Vault: &v1.VaultIssuer{
+								Server:    "https://vault.example.com",
+								Namespace: tc.vaultNS,
+								Auth: cmapi.VaultAuth{
+									TokenSecretRef: &cmmeta.SecretKeySelector{
+										LocalObjectReference: cmmeta.LocalObjectReference{
+											Name: "secret1",
+										},
+										Key: "key1",
+									},
+								},
+							},
+						},
+					},
+				})
+			require.NoError(t, err)
+			assert.Equal(t, tc.vaultNS, c.(*Vault).client.(*vault.Client).Namespace(),
+				"The vault client should have the namespace provided in the Issuer recource")
+			assert.Equal(t, "", c.(*Vault).clientSys.(*vault.Client).Namespace(),
+				"The vault sys client should never have a namespace")
+		})
+	}
+}
+
+// TestIsVaultInitiatedAndUnsealedIntegration demonstrates that it interacts only with the
+// sys/health endpoint and that it supplies the Vault token but not a Vault namespace header.
+func TestIsVaultInitiatedAndUnsealedIntegration(t *testing.T) {
+
+	const vaultToken = "token1"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sys/health", func(response http.ResponseWriter, request *http.Request) {
+		assert.Empty(t, request.Header.Values("X-Vault-Namespace"), "Unexpected Vault namespace header for root-only API path")
+		assert.Equal(t, vaultToken, request.Header.Get("X-Vault-Token"), "Expected the Vault token for root-only API path")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	v, err := New(
+		"k8s-ns1",
+		func(ns string) CreateToken { return nil },
+		listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
+			listers.SetFakeSecretNamespaceListerGet(
+				&corev1.Secret{
+					Data: map[string][]byte{
+						"key1": []byte(vaultToken),
+					},
+				}, nil),
+		),
+		&cmapi.Issuer{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "issuer1",
+				Namespace: "k8s-ns1",
+			},
+			Spec: v1.IssuerSpec{
+				IssuerConfig: v1.IssuerConfig{
+					Vault: &v1.VaultIssuer{
+						Server:    server.URL,
+						Namespace: "ns1",
+						Auth: cmapi.VaultAuth{
+							TokenSecretRef: &cmmeta.SecretKeySelector{
+								LocalObjectReference: cmmeta.LocalObjectReference{
+									Name: "secret1",
+								},
+								Key: "key1",
+							},
+						},
+					},
+				},
+			},
+		})
+	require.NoError(t, err)
+
+	err = v.IsVaultInitializedAndUnsealed()
+	require.NoError(t, err)
+}
+
+// TestSignIntegration demonstrates that it interacts only with the API endpoint
+// path supplied in the Issuer resource and that it supplies the Vault namespace
+// and token to that endpoint.
+func TestSignIntegration(t *testing.T) {
+	const (
+		vaultToken     = "token1"
+		vaultNamespace = "vault-ns-1"
+		vaultPath      = "my_pki_mount/sign/my-role-name"
+	)
+
+	privatekey := generateRSAPrivateKey(t)
+	csrPEM := generateCSR(t, privatekey)
+
+	rootBundleData, err := bundlePEM(testIntermediateCa, testRootCa)
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/v1/%s", vaultPath), func(response http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, vaultNamespace, request.Header.Get("X-Vault-Namespace"), "Expected Vault namespace header for namespaced API path")
+		assert.Equal(t, vaultToken, request.Header.Get("X-Vault-Token"), "Expected the Vault token for root-only API path")
+		_, err := response.Write(rootBundleData)
+		require.NoError(t, err)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	v, err := New(
+		"k8s-ns1",
+		func(ns string) CreateToken { return nil },
+		listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
+			listers.SetFakeSecretNamespaceListerGet(
+				&corev1.Secret{
+					Data: map[string][]byte{
+						"key1": []byte(vaultToken),
+					},
+				}, nil),
+		),
+		&cmapi.Issuer{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "issuer1",
+				Namespace: "k8s-ns1",
+			},
+			Spec: v1.IssuerSpec{
+				IssuerConfig: v1.IssuerConfig{
+					Vault: &v1.VaultIssuer{
+						Server:    server.URL,
+						Path:      vaultPath,
+						Namespace: vaultNamespace,
+						Auth: cmapi.VaultAuth{
+							TokenSecretRef: &cmmeta.SecretKeySelector{
+								LocalObjectReference: cmmeta.LocalObjectReference{
+									Name: "secret1",
+								},
+								Key: "key1",
+							},
+						},
+					},
+				},
+			},
+		})
+	require.NoError(t, err)
+
+	certPEM, caPEM, err := v.Sign(csrPEM, time.Hour)
+	require.NoError(t, err)
+	require.NotEmpty(t, certPEM)
+	require.NotEmpty(t, caPEM)
 }

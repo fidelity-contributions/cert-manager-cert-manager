@@ -23,19 +23,23 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/go-logr/logr"
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	experimentalapi "github.com/cert-manager/cert-manager/pkg/apis/experimental/v1alpha1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	cmerrors "github.com/cert-manager/cert-manager/pkg/util/errors"
 	"github.com/cert-manager/cert-manager/pkg/util/kube"
@@ -53,7 +57,7 @@ type signingFn func(*x509.Certificate, *x509.Certificate, crypto.PublicKey, inte
 // using SelfSigning Issuers.
 type SelfSigned struct {
 	issuerOptions controllerpkg.IssuerOptions
-	secretsLister corelisters.SecretLister
+	secretsLister internalinformers.SecretLister
 
 	certClient certificatesclient.CertificateSigningRequestInterface
 
@@ -70,7 +74,28 @@ func init() {
 	// create certificate signing request controller for selfsigned issuer
 	controllerpkg.Register(CSRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CSRControllerName).
-			For(certificatesigningrequests.New(apiutil.IssuerSelfSigned, NewSelfSigned)).
+			For(certificatesigningrequests.New(
+				apiutil.IssuerSelfSigned, NewSelfSigned,
+
+				// Handle informed Secrets which may be referenced by the
+				// "experimental.cert-manager.io/private-key-secret-name" annotation.
+				func(ctx *controllerpkg.Context, log logr.Logger, queue workqueue.RateLimitingInterface) ([]cache.InformerSynced, error) {
+					secretInformer := ctx.KubeSharedInformerFactory.Secrets().Informer()
+					certificateSigningRequestLister := ctx.KubeSharedInformerFactory.CertificateSigningRequests().Lister()
+					helper := issuer.NewHelper(
+						ctx.SharedInformerFactory.Certmanager().V1().Issuers().Lister(),
+						ctx.SharedInformerFactory.Certmanager().V1().ClusterIssuers().Lister(),
+					)
+					secretInformer.AddEventHandler(&controllerpkg.BlockingEventHandler{
+						WorkFunc: handleSecretReferenceWorkFunc(log, certificateSigningRequestLister, helper, queue, ctx.IssuerOptions),
+					})
+					return []cache.InformerSynced{
+						secretInformer.HasSynced,
+						ctx.SharedInformerFactory.Certmanager().V1().Issuers().Informer().HasSynced,
+						ctx.SharedInformerFactory.Certmanager().V1().ClusterIssuers().Informer().HasSynced,
+					}, nil
+				},
+			)).
 			Complete()
 	})
 }
@@ -79,7 +104,7 @@ func init() {
 func NewSelfSigned(ctx *controllerpkg.Context) certificatesigningrequests.Signer {
 	return &SelfSigned{
 		issuerOptions: ctx.IssuerOptions,
-		secretsLister: ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+		secretsLister: ctx.KubeSharedInformerFactory.Secrets().Lister(),
 		certClient:    ctx.Client.CertificatesV1().CertificateSigningRequests(),
 		fieldManager:  ctx.FieldManager,
 		recorder:      ctx.Recorder,
@@ -115,18 +140,14 @@ func (s *SelfSigned) Sign(ctx context.Context, csr *certificatesv1.CertificateSi
 		message := fmt.Sprintf("Referenced Secret %s/%s not found", resourceNamespace, secretName)
 		log.Error(err, message)
 		s.recorder.Event(csr, corev1.EventTypeWarning, "SecretNotFound", message)
-		util.CertificateSigningRequestSetFailed(csr, "SecretNotFound", message)
-		_, err = util.UpdateOrApplyStatus(ctx, s.certClient, csr, certificatesv1.CertificateFailed, s.fieldManager)
-		return err
+		return nil
 	}
 
 	if cmerrors.IsInvalidData(err) {
 		message := fmt.Sprintf("Failed to parse signing key from secret %s/%s", resourceNamespace, secretName)
 		log.Error(err, message)
 		s.recorder.Eventf(csr, corev1.EventTypeWarning, "ErrorParsingKey", "%s: %s", message, err)
-		util.CertificateSigningRequestSetFailed(csr, "ErrorParsingKey", message)
-		_, err = util.UpdateOrApplyStatus(ctx, s.certClient, csr, certificatesv1.CertificateFailed, s.fieldManager)
-		return err
+		return nil
 	}
 
 	if err != nil {
@@ -139,7 +160,7 @@ func (s *SelfSigned) Sign(ctx context.Context, csr *certificatesv1.CertificateSi
 		return err
 	}
 
-	template, err := pki.GenerateTemplateFromCertificateSigningRequest(csr)
+	template, err := pki.CertificateTemplateFromCertificateSigningRequest(csr)
 	if err != nil {
 		message := fmt.Sprintf("Error generating certificate template: %s", err)
 		log.Error(err, message)

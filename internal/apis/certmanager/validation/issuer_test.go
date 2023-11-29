@@ -24,11 +24,14 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	"k8s.io/utils/clock"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	cmacme "github.com/cert-manager/cert-manager/internal/apis/acme"
 	cmapi "github.com/cert-manager/cert-manager/internal/apis/certmanager"
 	cmmeta "github.com/cert-manager/cert-manager/internal/apis/meta"
+	pubcmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	unitcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
 )
 
 var (
@@ -62,11 +65,36 @@ var (
 )
 
 func TestValidateVaultIssuerConfig(t *testing.T) {
-	fldPath := field.NewPath("")
+	caBundle := unitcrypto.MustCreateCryptoBundle(t,
+		&pubcmapi.Certificate{Spec: pubcmapi.CertificateSpec{CommonName: "test"}},
+		clock.RealClock{},
+	).CertBytes
+
+	fldPath := field.NewPath("spec")
 	scenarios := map[string]struct {
 		spec *cmapi.VaultIssuer
 		errs []*field.Error
 	}{
+		"vault issuer defines both caBundle and caBundleSecretRef": {
+			spec: &cmapi.VaultIssuer{
+				Server:   "https://vault.example.com",
+				Path:     "secret/path",
+				CABundle: caBundle,
+				CABundleSecretRef: &cmmeta.SecretKeySelector{
+					Key: "ca.crt",
+					LocalObjectReference: cmmeta.LocalObjectReference{
+						Name: "test-secret",
+					},
+				},
+				Auth: cmapi.VaultAuth{
+					TokenSecretRef: &validSecretKeyRef,
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("caBundle"), "<snip>", "specified caBundle and caBundleSecretRef cannot be used together"),
+				field.Invalid(fldPath.Child("caBundleSecretRef"), "test-secret", "specified caBundleSecretRef and caBundle cannot be used together"),
+			},
+		},
 		"valid vault issuer": {
 			spec: &validVaultIssuer,
 		},
@@ -75,16 +103,20 @@ func TestValidateVaultIssuerConfig(t *testing.T) {
 			errs: []*field.Error{
 				field.Required(fldPath.Child("server"), ""),
 				field.Required(fldPath.Child("path"), ""),
+				field.Required(fldPath.Child("auth"), "please supply one of: appRole, kubernetes, tokenSecretRef"),
 			},
 		},
-		"vault issuer with invalid fields": {
+		"vault issuer with a CA bundle containing no valid certificates": {
 			spec: &cmapi.VaultIssuer{
 				Server:   "something",
 				Path:     "a/b/c",
 				CABundle: []byte("invalid"),
+				Auth: cmapi.VaultAuth{
+					TokenSecretRef: &validSecretKeyRef,
+				},
 			},
 			errs: []*field.Error{
-				field.Invalid(fldPath.Child("caBundle"), "", "Specified CA bundle is invalid"),
+				field.Invalid(fldPath.Child("caBundle"), "<snip>", "cert bundle didn't contain any valid certificates"),
 			},
 		},
 	}
@@ -105,8 +137,175 @@ func TestValidateVaultIssuerConfig(t *testing.T) {
 	}
 }
 
+func TestValidateVaultIssuerAuth(t *testing.T) {
+	fldPath := field.NewPath("spec.auth")
+	scenarios := map[string]struct {
+		auth *cmapi.VaultAuth
+		errs []*field.Error
+	}{
+		// For backwards compatibility, we allow the user to set all auth types.
+		// We have documented in the API the order of precedence.
+		"valid auth: all three auth types can be set simultaneously": {
+			auth: &cmapi.VaultAuth{
+				AppRole: &cmapi.VaultAppRole{
+					RoleId: "role-id",
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+						Key:                  "key",
+					},
+					Path: "path",
+				},
+				TokenSecretRef: &validSecretKeyRef,
+				Kubernetes: &cmapi.VaultKubernetesAuth{
+					Path: "path",
+					Role: "role",
+					ServiceAccountRef: &cmapi.ServiceAccountRef{
+						Name: "service-account",
+					},
+				},
+			},
+		},
+		"valid auth.tokenSecretRef": {
+			auth: &cmapi.VaultAuth{
+				TokenSecretRef: &cmmeta.SecretKeySelector{
+					LocalObjectReference: cmmeta.LocalObjectReference{
+						Name: "secret",
+					},
+					Key: "key",
+				},
+			},
+		},
+		// The default value for auth.tokenSecretRef.key is 'token'. This
+		// behavior is not documented in the API reference, but we keep it for
+		// backward compatibility.
+		"invalid auth.tokenSecretRef: key can be omitted": {
+			auth: &cmapi.VaultAuth{
+				TokenSecretRef: &cmmeta.SecretKeySelector{
+					LocalObjectReference: cmmeta.LocalObjectReference{
+						Name: "secret",
+					},
+				},
+			},
+		},
+		"valid auth.appRole": {
+			auth: &cmapi.VaultAuth{
+				AppRole: &cmapi.VaultAppRole{
+					RoleId: "role-id",
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+						Key:                  "key",
+					},
+					Path: "path",
+				},
+			},
+		},
+		// TODO(mael): The reason we allow the user to omit the key but we say
+		// in the documentation that "key must be specified" is because the
+		// controller-side validation doesn't check that the key is empty. We
+		// should add a check for that.
+		"valid auth.appRole: key can be omitted": {
+			auth: &cmapi.VaultAuth{
+				AppRole: &cmapi.VaultAppRole{
+					RoleId: "role-id",
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+					},
+					Path: "path",
+				},
+			},
+		},
+		"invalid auth.appRole: roleId is required": {
+			auth: &cmapi.VaultAuth{
+				AppRole: &cmapi.VaultAppRole{
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+						Key:                  "key",
+					},
+					Path: "path",
+				},
+			},
+			errs: []*field.Error{
+				field.Required(fldPath.Child("appRole").Child("roleId"), ""),
+			},
+		},
+		// The field auth.kubernetes.secretRef.key defaults to 'token' if
+		// not specified.
+		"valid auth.kubernetes.secretRef: key can be left empty": {
+			auth: &cmapi.VaultAuth{
+				Kubernetes: &cmapi.VaultKubernetesAuth{
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+					},
+					Role: "role",
+				},
+			},
+		},
+		"valid auth.kubernetes.serviceAccountRef": {
+			auth: &cmapi.VaultAuth{
+				Kubernetes: &cmapi.VaultKubernetesAuth{
+					Path: "path",
+					Role: "role",
+					ServiceAccountRef: &cmapi.ServiceAccountRef{
+						Name: "service-account",
+					},
+				},
+			},
+		},
+		"invalid auth.kubernetes: role is required": {
+			auth: &cmapi.VaultAuth{
+				Kubernetes: &cmapi.VaultKubernetesAuth{
+					Path: "path",
+					ServiceAccountRef: &cmapi.ServiceAccountRef{
+						Name: "service-account",
+					},
+				},
+			},
+			errs: []*field.Error{
+				field.Required(fldPath.Child("kubernetes").Child("role"), ""),
+			},
+		},
+		"invalid auth.kubernetes: secretRef and serviceAccountRef mutually exclusive": {
+			auth: &cmapi.VaultAuth{
+				Kubernetes: &cmapi.VaultKubernetesAuth{
+					SecretRef: cmmeta.SecretKeySelector{
+						LocalObjectReference: cmmeta.LocalObjectReference{Name: "secret"},
+					},
+					ServiceAccountRef: &cmapi.ServiceAccountRef{
+						Name: "service-account",
+					},
+					Role: "role",
+				},
+			},
+			errs: []*field.Error{
+				field.Forbidden(fldPath.Child("kubernetes"), "please supply one of: secretRef, serviceAccountRef"),
+			},
+		},
+	}
+	for n, s := range scenarios {
+		t.Run(n, func(t *testing.T) {
+			errs := ValidateVaultIssuerAuth(s.auth, fldPath)
+			if len(errs) != len(s.errs) {
+				t.Errorf("Expected %v but got %v", s.errs, errs)
+				return
+			}
+			for i, e := range errs {
+				expectedErr := s.errs[i]
+				if !reflect.DeepEqual(e, expectedErr) {
+					t.Errorf("Expected %v but got %v", expectedErr, e)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateACMEIssuerConfig(t *testing.T) {
 	fldPath := field.NewPath("")
+
+	caBundle := unitcrypto.MustCreateCryptoBundle(t,
+		&pubcmapi.Certificate{Spec: pubcmapi.CertificateSpec{CommonName: "test"}},
+		clock.RealClock{},
+	).CertBytes
+
 	scenarios := map[string]struct {
 		spec     *cmacme.ACMEIssuer
 		errs     []*field.Error
@@ -120,6 +319,44 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 			errs: []*field.Error{
 				field.Required(fldPath.Child("privateKeySecretRef", "name"), "private key secret name is a required field"),
 				field.Required(fldPath.Child("server"), "acme server URL is a required field"),
+			},
+		},
+		"acme issuer with an invalid CA bundle": {
+			spec: &cmacme.ACMEIssuer{
+				Email:      "valid-email",
+				Server:     "valid-server",
+				CABundle:   []byte("abc123"),
+				PrivateKey: validSecretKeyRef,
+				Solvers: []cmacme.ACMEChallengeSolver{
+					{
+						DNS01: &cmacme.ACMEChallengeSolverDNS01{
+							CloudDNS: &validCloudDNSProvider,
+						},
+					},
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("caBundle"), "", "cert bundle didn't contain any valid certificates"),
+			},
+		},
+		"acme issuer with both a CA bundle and SkipTLSVerify": {
+			spec: &cmacme.ACMEIssuer{
+				Email:         "valid-email",
+				Server:        "valid-server",
+				CABundle:      caBundle,
+				SkipTLSVerify: true,
+				PrivateKey:    validSecretKeyRef,
+				Solvers: []cmacme.ACMEChallengeSolver{
+					{
+						DNS01: &cmacme.ACMEChallengeSolverDNS01{
+							CloudDNS: &validCloudDNSProvider,
+						},
+					},
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("caBundle"), "", "caBundle and skipTLSVerify are mutually exclusive and cannot both be set"),
+				field.Invalid(fldPath.Child("skipTLSVerify"), true, "caBundle and skipTLSVerify are mutually exclusive and cannot both be set"),
 			},
 		},
 		"acme solver without any config": {
@@ -245,7 +482,7 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 					{
 						HTTP01: &cmacme.ACMEChallengeSolverHTTP01{
 							GatewayHTTPRoute: &cmacme.ACMEChallengeSolverHTTP01GatewayHTTPRoute{
-								ParentRefs: []gwapi.ParentRef{
+								ParentRefs: []gwapi.ParentReference{
 									{
 										Name: "blah",
 									},
@@ -289,7 +526,7 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 								Labels: map[string]string{
 									"a": "b",
 								},
-								ParentRefs: []gwapi.ParentRef{
+								ParentRefs: []gwapi.ParentReference{
 									{
 										Name: "blah",
 									},
@@ -500,6 +737,30 @@ func TestValidateIssuerSpec(t *testing.T) {
 				field.Invalid(fldPath.Child("ca", "ocspServer").Index(0), "", `must be a valid URL, e.g., http://ocsp.int-x3.letsencrypt.org`),
 			},
 		},
+		"valid IssuingCertificateURLs": {
+			spec: &cmapi.IssuerSpec{
+				IssuerConfig: cmapi.IssuerConfig{
+					CA: &cmapi.CAIssuer{
+						SecretName:             "valid",
+						IssuingCertificateURLs: []string{"http://ca.example.com/ca.crt"},
+					},
+				},
+			},
+			errs: []*field.Error{},
+		},
+		"invalid IssuingCertificateURLs": {
+			spec: &cmapi.IssuerSpec{
+				IssuerConfig: cmapi.IssuerConfig{
+					CA: &cmapi.CAIssuer{
+						SecretName:             "valid",
+						IssuingCertificateURLs: []string{""},
+					},
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("ca", "issuingCertificateURLs").Index(0), "", `must be a valid URL`),
+			},
+		},
 	}
 	for n, s := range scenarios {
 		t.Run(n, func(t *testing.T) {
@@ -527,6 +788,11 @@ func TestValidateACMEIssuerHTTP01Config(t *testing.T) {
 				Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{Class: strPtr("abc")},
 			},
 		},
+		"ingressClassName field specified": {
+			cfg: &cmacme.ACMEChallengeSolverHTTP01{
+				Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{IngressClassName: strPtr("abc")},
+			},
+		},
 		"neither field specified": {
 			cfg: &cmacme.ACMEChallengeSolverHTTP01{
 				Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{},
@@ -538,15 +804,26 @@ func TestValidateACMEIssuerHTTP01Config(t *testing.T) {
 				field.Required(fldPath, "no HTTP01 solver type configured"),
 			},
 		},
-		"both fields specified": {
+		"all three fields specified": {
 			cfg: &cmacme.ACMEChallengeSolverHTTP01{
 				Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{
-					Name:  "abc",
-					Class: strPtr("abc"),
+					Name:             "abc",
+					Class:            strPtr("abc"),
+					IngressClassName: strPtr("abc"),
 				},
 			},
 			errs: []*field.Error{
-				field.Forbidden(fldPath.Child("ingress"), "only one of 'name' or 'class' should be specified"),
+				field.Forbidden(fldPath.Child("ingress"), "only one of 'ingressClassName', 'name' or 'class' should be specified"),
+			},
+		},
+		"ingressClassName is invalid": {
+			cfg: &cmacme.ACMEChallengeSolverHTTP01{
+				Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{
+					IngressClassName: strPtr("azure/application-gateway"),
+				},
+			},
+			errs: []*field.Error{
+				field.Invalid(fldPath.Child("ingress", "ingressClassName"), "azure/application-gateway", `must be a valid IngressClass name: a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`),
 			},
 		},
 		"acme issuer with valid http01 service config serviceType ClusterIP": {
@@ -711,18 +988,15 @@ func TestValidateACMEIssuerDNS01Config(t *testing.T) {
 			},
 			errs: []*field.Error{
 				field.Required(fldPath.Child("route53", "region"), ""),
-				field.Required(fldPath.Child("route53"), "accessKeyID or accessKeyIDSecretRef is required"),
 			},
 		},
-		"missing route53 accessKeyID and accessKeyIDSecretRef": {
+		"missing route53 accessKeyID and accessKeyIDSecretRef should be valid because ambient credentials may be used instead": {
 			cfg: &cmacme.ACMEChallengeSolverDNS01{
 				Route53: &cmacme.ACMEIssuerDNS01ProviderRoute53{
 					Region: "valid",
 				},
 			},
-			errs: []*field.Error{
-				field.Required(fldPath.Child("route53"), "accessKeyID or accessKeyIDSecretRef is required"),
-			},
+			errs: []*field.Error{},
 		},
 		"both route53 accessKeyID and accessKeyIDSecretRef specified": {
 			cfg: &cmacme.ACMEChallengeSolverDNS01{

@@ -25,10 +25,11 @@ import (
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/kubernetes"
 	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	internalvault "github.com/cert-manager/cert-manager/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -49,7 +50,8 @@ type signingFn func(*x509.Certificate, *x509.Certificate, crypto.PublicKey, inte
 // using Vault Issuers.
 type Vault struct {
 	issuerOptions controllerpkg.IssuerOptions
-	secretsLister corelisters.SecretLister
+	kclient       kubernetes.Interface
+	secretsLister internalinformers.SecretLister
 
 	recorder record.EventRecorder
 
@@ -71,7 +73,8 @@ func init() {
 func NewVault(ctx *controllerpkg.Context) certificatesigningrequests.Signer {
 	return &Vault{
 		issuerOptions: ctx.IssuerOptions,
-		secretsLister: ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+		kclient:       ctx.Client,
+		secretsLister: ctx.KubeSharedInformerFactory.Secrets().Lister(),
 		recorder:      ctx.Recorder,
 		certClient:    ctx.Client.CertificatesV1().CertificateSigningRequests(),
 		clientBuilder: internalvault.New,
@@ -89,7 +92,8 @@ func (v *Vault) Sign(ctx context.Context, csr *certificatesv1.CertificateSigning
 
 	resourceNamespace := v.issuerOptions.ResourceNamespace(issuerObj)
 
-	client, err := v.clientBuilder(resourceNamespace, v.secretsLister, issuerObj)
+	createTokenFn := func(ns string) internalvault.CreateToken { return v.kclient.CoreV1().ServiceAccounts(ns).CreateToken }
+	client, err := v.clientBuilder(resourceNamespace, createTokenFn, v.secretsLister, issuerObj)
 	if apierrors.IsNotFound(err) {
 		message := "Required secret resource not found"
 		log.Error(err, message)

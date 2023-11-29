@@ -23,17 +23,17 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	"github.com/cert-manager/cert-manager/e2e-tests/util"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	"github.com/cert-manager/cert-manager/test/e2e/util"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -321,9 +321,8 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		// TODO: we should use observedGeneration here, but currently it won't
 		// be incremented correctly in this scenario.
 		// Verify that Issuer's Ready condition remains True for 5 seconds.
-		err = wait.Poll(time.Millisecond*200, time.Second*5, func() (bool, error) {
-			iss, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Get(
-				context.TODO(), issuerName, metav1.GetOptions{})
+		err = wait.PollUntilContextTimeout(context.TODO(), time.Millisecond*200, time.Second*5, true, func(ctx context.Context) (bool, error) {
+			iss, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Get(ctx, issuerName, metav1.GetOptions{})
 			if err != nil {
 				return false, err
 			}
@@ -337,6 +336,6 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 			return false, nil
 		})
 		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError(wait.ErrWaitTimeout))
+		Expect(err).To(MatchError(context.DeadlineExceeded))
 	})
 })

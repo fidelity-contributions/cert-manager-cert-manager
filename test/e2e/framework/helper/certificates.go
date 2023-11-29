@@ -27,12 +27,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/certmanager/v1"
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 // WaitForCertificateToExist waits for the named certificate to exist and returns the certificate
@@ -41,7 +41,8 @@ func (h *Helper) WaitForCertificateToExist(namespace string, name string, timeou
 	var certificate *v1.Certificate
 	logf, done := log.LogBackoff()
 	defer done()
-	pollErr := wait.PollImmediate(500*time.Millisecond, timeout, func() (bool, error) {
+
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
 		logf("Waiting for Certificate %v to exist", name)
 		var err error
 		certificate, err = client.Get(context.TODO(), name, metav1.GetOptions{})
@@ -59,7 +60,7 @@ func (h *Helper) WaitForCertificateToExist(namespace string, name string, timeou
 
 func (h *Helper) waitForCertificateCondition(client clientset.CertificateInterface, name string, check func(*v1.Certificate) bool, timeout time.Duration) (*cmapi.Certificate, error) {
 	var certificate *v1.Certificate
-	pollErr := wait.PollImmediate(500*time.Millisecond, timeout, func() (bool, error) {
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
 		var err error
 		certificate, err = client.Get(context.TODO(), name, metav1.GetOptions{})
 		if nil != err {
@@ -174,7 +175,7 @@ func (h *Helper) WaitForCertificateNotReadyAndDoneIssuing(cert *cmapi.Certificat
 
 func (h *Helper) waitForIssuerCondition(client clientset.IssuerInterface, name string, check func(issuer *v1.Issuer) bool, timeout time.Duration) (*cmapi.Issuer, error) {
 	var issuer *v1.Issuer
-	pollErr := wait.PollImmediate(500*time.Millisecond, timeout, func() (bool, error) {
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
 		var err error
 		issuer, err = client.Get(context.TODO(), name, metav1.GetOptions{})
 		if nil != err {
@@ -221,7 +222,7 @@ func (h *Helper) WaitIssuerReady(issuer *cmapi.Issuer, timeout time.Duration) (*
 
 func (h *Helper) waitForClusterIssuerCondition(client clientset.ClusterIssuerInterface, name string, check func(issuer *v1.ClusterIssuer) bool, timeout time.Duration) (*cmapi.ClusterIssuer, error) {
 	var issuer *v1.ClusterIssuer
-	pollErr := wait.PollImmediate(500*time.Millisecond, timeout, func() (bool, error) {
+	pollErr := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
 		var err error
 		issuer, err = client.Get(context.TODO(), name, metav1.GetOptions{})
 		if nil != err {

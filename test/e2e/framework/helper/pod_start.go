@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/e2e-tests/framework/log"
 )
 
 const (
@@ -47,7 +47,7 @@ func (h *Helper) WaitForAllPodsRunningInNamespaceTimeout(ns string, timeout time
 	ginkgo.By("Waiting " + timeout.String() + " for all pods in namespace '" + ns + "' to be Ready")
 	logf, done := log.LogBackoff()
 	defer done()
-	return wait.PollImmediate(Poll, timeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.TODO(), Poll, timeout, true, func(ctx context.Context) (bool, error) {
 		pods, err := h.KubeClient.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			return false, err

@@ -26,10 +26,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakeclock "k8s.io/utils/clock/testing"
 
+	"github.com/cert-manager/cert-manager/integration-tests/framework"
 	internalcertificaterequests "github.com/cert-manager/cert-manager/internal/controller/certificaterequests"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/test/integration/framework"
 	testcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
 )
 
@@ -47,7 +47,7 @@ func Test_Apply(t *testing.T) {
 	restConfig, stopFn := framework.RunControlPlane(t, ctx)
 	defer stopFn()
 
-	kubeClient, _, cmClient, _ := framework.NewClients(t, restConfig)
+	kubeClient, _, cmClient, _, _ := framework.NewClients(t, restConfig)
 
 	t.Log("creating test Namespace")
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}

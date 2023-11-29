@@ -22,21 +22,21 @@ import (
 	"encoding/pem"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	e2eutil "github.com/cert-manager/cert-manager/e2e-tests/util"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -370,11 +370,11 @@ var _ = framework.CertManagerDescribe("Certificate AdditionalCertificateOutputFo
 				var fieldset fieldpath.Set
 				Expect(fieldset.FromJSON(bytes.NewReader(managedField.FieldsV1.Raw)))
 				if fieldset.Has(fieldpath.Path{
-					{FieldName: pointer.String("data")},
-					{FieldName: pointer.String("tls-combined.pem")},
+					{FieldName: ptr.To("data")},
+					{FieldName: ptr.To("tls-combined.pem")},
 				}) && fieldset.Has(fieldpath.Path{
-					{FieldName: pointer.String("data")},
-					{FieldName: pointer.String("key.der")},
+					{FieldName: ptr.To("data")},
+					{FieldName: ptr.To("key.der")},
 				}) {
 					return true
 				}

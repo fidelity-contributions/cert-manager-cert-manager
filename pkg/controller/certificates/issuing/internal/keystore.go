@@ -24,28 +24,13 @@ package internal
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/x509"
 	"time"
 
-	jks "github.com/pavel-v-chernykh/keystore-go/v4"
+	jks "github.com/pavlo-v-chernykh/keystore-go/v4"
 	"software.sslmate.com/src/go-pkcs12"
 
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
-)
-
-const (
-	// pkcs12SecretKey is the name of the data entry in the Secret resource
-	// used to store the p12 file.
-	pkcs12SecretKey = "keystore.p12"
-	// Data Entry Name in the Secret resource for PKCS12 containing Certificate Authority
-	pkcs12TruststoreKey = "truststore.p12"
-
-	// jksSecretKey is the name of the data entry in the Secret resource
-	// used to store the jks file.
-	jksSecretKey = "keystore.jks"
-	// Data Entry Name in the Secret resource for JKS containing Certificate Authority
-	jksTruststoreKey = "truststore.jks"
 )
 
 // encodePKCS12Keystore will encode a PKCS12 keystore using the password provided.
@@ -74,7 +59,7 @@ func encodePKCS12Keystore(password string, rawKey []byte, certPem []byte, caPem 
 	if len(certs) > 1 {
 		cas = append(certs[1:], cas...)
 	}
-	return pkcs12.Encode(rand.Reader, key, certs[0], cas, password)
+	return pkcs12.LegacyRC2.Encode(key, certs[0], cas, password)
 }
 
 func encodePKCS12Truststore(password string, caPem []byte) ([]byte, error) {
@@ -84,7 +69,7 @@ func encodePKCS12Truststore(password string, caPem []byte) ([]byte, error) {
 	}
 
 	var cas = []*x509.Certificate{ca}
-	return pkcs12.EncodeTrustStore(rand.Reader, cas, password)
+	return pkcs12.LegacyRC2.EncodeTrustStore(cas, password)
 }
 
 func encodeJKSKeystore(password []byte, rawKey []byte, certPem []byte, caPem []byte) ([]byte, error) {

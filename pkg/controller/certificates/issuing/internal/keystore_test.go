@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	fuzz "github.com/google/gofuzz"
-	jks "github.com/pavel-v-chernykh/keystore-go/v4"
+	jks "github.com/pavlo-v-chernykh/keystore-go/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -56,7 +56,7 @@ func mustSelfSignCertificate(t *testing.T, pkBytes []byte) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x509Crt, err := pki.GenerateTemplate(&cmapi.Certificate{
+	x509Crt, err := pki.CertificateTemplateFromCertificate(&cmapi.Certificate{
 		Spec: cmapi.CertificateSpec{
 			DNSNames: []string{"example.com"},
 		},
@@ -84,7 +84,7 @@ func mustCert(t *testing.T, commonName string, isCA bool) *keyAndCert {
 	keyPEM, err := pki.EncodePrivateKey(key, cmapi.PKCS8)
 	require.NoError(t, err)
 
-	cert, err := pki.GenerateTemplate(&cmapi.Certificate{
+	cert, err := pki.CertificateTemplateFromCertificate(&cmapi.Certificate{
 		Spec: cmapi.CertificateSpec{
 			CommonName: commonName,
 			IsCA:       isCA,
@@ -335,7 +335,7 @@ func TestEncodePKCS12Keystore(t *testing.T) {
 	})
 	t.Run("encodePKCS12Keystore *prepends* non-leaf certificates to the supplied CA certificate chain", func(t *testing.T) {
 		const password = "password"
-		var caChainInPEM []byte = mustSelfSignCertificate(t, nil)
+		caChainInPEM := mustSelfSignCertificate(t, nil)
 		caChainIn, err := pki.DecodeX509CertificateChainBytes(caChainInPEM)
 		require.NoError(t, err)
 
@@ -398,13 +398,23 @@ func TestManyPasswordLengths(t *testing.T) {
 	certPEM := mustSelfSignCertificate(t, nil)
 	caPEM := mustSelfSignCertificate(t, nil)
 
+	const testN = 10000
+
 	// We will test random password lengths between 0 and 128 character lengths
 	f := fuzz.New().NilChance(0).NumElements(0, 128)
+	// Pre-create password test cases. This cannot be done during the test itself
+	// since the fuzzer cannot be used concurrently.
+	var passwords [testN]string
+	for testi := 0; testi < testN; testi++ {
+		// fill the password with random characters
+		f.Fuzz(&passwords[testi])
+	}
 
 	// Run these tests in parallel
 	s := semaphore.NewWeighted(32)
 	g, ctx := errgroup.WithContext(context.Background())
-	for tests := 0; tests < 10000; tests++ {
+	for tests := 0; tests < testN; tests++ {
+		testi := tests
 		if ctx.Err() != nil {
 			t.Errorf("internal error while testing JKS Keystore password lengths: %s", ctx.Err())
 			return
@@ -415,20 +425,17 @@ func TestManyPasswordLengths(t *testing.T) {
 		}
 		g.Go(func() error {
 			defer s.Release(1)
-			var password string
-			// fill the password with random characters
-			f.Fuzz(&password)
-			keystore, err := encodeJKSKeystore([]byte(password), rawKey, certPEM, caPEM)
+			keystore, err := encodeJKSKeystore([]byte(passwords[testi]), rawKey, certPEM, caPEM)
 			if err != nil {
-				t.Errorf("couldn't encode JKS Keystore with password %s (length %d): %s", password, len(password), err.Error())
+				t.Errorf("couldn't encode JKS Keystore with password %s (length %d): %s", passwords[testi], len(passwords[testi]), err.Error())
 				return err
 			}
 
 			buf := bytes.NewBuffer(keystore)
 			ks := jks.New()
-			err = ks.Load(buf, []byte(password))
+			err = ks.Load(buf, []byte(passwords[testi]))
 			if err != nil {
-				t.Errorf("error decoding keystore with password %s (length %d): %v", password, len(password), err)
+				t.Errorf("error decoding keystore with password %s (length %d): %v", passwords[testi], len(passwords[testi]), err)
 				return err
 			}
 			if !ks.IsPrivateKeyEntry("certificate") {

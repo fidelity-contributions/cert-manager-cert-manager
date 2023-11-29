@@ -27,17 +27,20 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
+	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/rest"
 	coretesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/clock"
 	fakeclock "k8s.io/utils/clock/testing"
-	gwfake "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned/fake"
-	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/gateway/externalversions"
+	gwfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
+	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmfake "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/fake"
 	informers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
@@ -49,9 +52,9 @@ import (
 )
 
 func init() {
-	logs.InitLogs(nil)
-	_ = flag.Set("alsologtostderr", fmt.Sprintf("%t", true))
-	_ = flag.Lookup("v").Value.Set("4")
+	logs.InitLogs()
+	_ = flag.Set("alsologtostderr", "true")
+	_ = flag.Set("v", "4")
 }
 
 // Builder is a structure used to construct new Contexts for use during tests.
@@ -61,12 +64,13 @@ func init() {
 type Builder struct {
 	T *testing.T
 
-	KubeObjects        []runtime.Object
-	CertManagerObjects []runtime.Object
-	GWObjects          []runtime.Object
-	ExpectedActions    []Action
-	ExpectedEvents     []string
-	StringGenerator    StringGenerator
+	KubeObjects            []runtime.Object
+	CertManagerObjects     []runtime.Object
+	GWObjects              []runtime.Object
+	PartialMetadataObjects []runtime.Object
+	ExpectedActions        []Action
+	ExpectedEvents         []string
+	StringGenerator        StringGenerator
 
 	// Clock will be the Clock set on the controller context.
 	// If not specified, the RealClock will be used.
@@ -110,10 +114,13 @@ func (b *Builder) Init() {
 	if b.StringGenerator == nil {
 		b.StringGenerator = RandStringBytes
 	}
+	scheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(scheme)
 	b.requiredReactors = make(map[string]bool)
 	b.Client = kubefake.NewSimpleClientset(b.KubeObjects...)
 	b.CMClient = cmfake.NewSimpleClientset(b.CertManagerObjects...)
 	b.GWClient = gwfake.NewSimpleClientset(b.GWObjects...)
+	b.MetadataClient = metadatafake.NewSimpleMetadataClient(scheme, b.PartialMetadataObjects...)
 	b.DiscoveryClient = discoveryfake.NewDiscovery().WithServerResourcesForGroupVersion(func(groupVersion string) (*metav1.APIResourceList, error) {
 		if groupVersion == networkingv1.SchemeGroupVersion.String() {
 			return &metav1.APIResourceList{
@@ -141,9 +148,10 @@ func (b *Builder) Init() {
 	b.FakeKubeClient().PrependReactor("create", "*", b.generateNameReactor)
 	b.FakeCMClient().PrependReactor("create", "*", b.generateNameReactor)
 	b.FakeGWClient().PrependReactor("create", "*", b.generateNameReactor)
-	b.KubeSharedInformerFactory = kubeinformers.NewSharedInformerFactory(b.Client, informerResyncPeriod)
+	b.KubeSharedInformerFactory = internalinformers.NewBaseKubeInformerFactory(b.Client, informerResyncPeriod, "")
 	b.SharedInformerFactory = informers.NewSharedInformerFactory(b.CMClient, informerResyncPeriod)
 	b.GWShared = gwinformers.NewSharedInformerFactory(b.GWClient, informerResyncPeriod)
+	b.HTTP01ResourceMetadataInformersFactory = metadatainformer.NewFilteredSharedInformerFactory(b.MetadataClient, informerResyncPeriod, "", func(listOptions *metav1.ListOptions) {})
 	b.stopCh = make(chan struct{})
 	b.Metrics = metrics.New(logs.Log, clock.RealClock{})
 
@@ -169,7 +177,7 @@ func (b *Builder) FakeKubeClient() *kubefake.Clientset {
 	return b.Context.Client.(*kubefake.Clientset)
 }
 
-func (b *Builder) FakeKubeInformerFactory() kubeinformers.SharedInformerFactory {
+func (b *Builder) FakeKubeInformerFactory() internalinformers.KubeInformerFactory {
 	return b.Context.KubeSharedInformerFactory
 }
 
@@ -314,13 +322,14 @@ func (b *Builder) Start() {
 	b.KubeSharedInformerFactory.Start(b.stopCh)
 	b.SharedInformerFactory.Start(b.stopCh)
 	b.GWShared.Start(b.stopCh)
+	b.HTTP01ResourceMetadataInformersFactory.Start(b.stopCh)
 
 	// wait for caches to sync
 	b.Sync()
 }
 
 func (b *Builder) Sync() {
-	if err := mustAllSync(b.KubeSharedInformerFactory.WaitForCacheSync(b.stopCh)); err != nil {
+	if err := mustAllSyncString(b.KubeSharedInformerFactory.WaitForCacheSync(b.stopCh)); err != nil {
 		panic("Error waiting for kubeSharedInformerFactory to sync: " + err.Error())
 	}
 	if err := mustAllSync(b.SharedInformerFactory.WaitForCacheSync(b.stopCh)); err != nil {
@@ -328,6 +337,9 @@ func (b *Builder) Sync() {
 	}
 	if err := mustAllSync(b.GWShared.WaitForCacheSync(b.stopCh)); err != nil {
 		panic("Error waiting for GWShared to sync: " + err.Error())
+	}
+	if err := mustAllSyncGVR(b.HTTP01ResourceMetadataInformersFactory.WaitForCacheSync(b.stopCh)); err != nil {
+		panic("Error waiting for MetadataInformerFactory to sync:" + err.Error())
 	}
 	if b.additionalSyncFuncs != nil {
 		cache.WaitForCacheSync(b.stopCh, b.additionalSyncFuncs...)
@@ -353,6 +365,32 @@ func (b *Builder) Events() []string {
 }
 
 func mustAllSync(in map[reflect.Type]bool) error {
+	var errs []error
+	for t, started := range in {
+		if !started {
+			errs = append(errs, fmt.Errorf("informer for %v not synced", t))
+		}
+	}
+	return utilerrors.NewAggregate(errs)
+}
+
+// We need three functions to parse map[schema.GroupVersionResource bool, map[reflect.Type]bool, map[string]bool
+// arguments- we cannot use generics here as reflect.Type is not a valid map key
+// for a generic parameter because it does not implement comparable.
+func mustAllSyncString(in map[string]bool) error {
+	var errs []error
+	for t, started := range in {
+		if !started {
+			errs = append(errs, fmt.Errorf("informer for %v not synced", t))
+		}
+	}
+	return utilerrors.NewAggregate(errs)
+}
+
+// We need three functions to parse map[reflect.Type]bool, map[string]bool
+// arguments- we cannot use generics here as reflect.Type is not a valid map key
+// for a generic parameter because it does not implement comparable.
+func mustAllSyncGVR(in map[schema.GroupVersionResource]bool) error {
 	var errs []error
 	for t, started := range in {
 		if !started {

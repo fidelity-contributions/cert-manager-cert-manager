@@ -27,9 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -38,11 +35,11 @@ import (
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
 	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
@@ -50,6 +47,7 @@ import (
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 	utilkube "github.com/cert-manager/cert-manager/pkg/util/kube"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	utilpki "github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/pkg/util/predicate"
 )
@@ -66,7 +64,7 @@ type localTemporarySignerFn func(crt *cmapi.Certificate, pk []byte) ([]byte, err
 type controller struct {
 	certificateLister        cmlisters.CertificateLister
 	certificateRequestLister cmlisters.CertificateRequestLister
-	secretLister             corelisters.SecretLister
+	secretLister             internalinformers.SecretLister
 	recorder                 record.EventRecorder
 	clock                    clock.Clock
 
@@ -92,23 +90,16 @@ type controller struct {
 
 func NewController(
 	log logr.Logger,
-	kubeClient kubernetes.Interface,
-	client cmclient.Interface,
-	factory informers.SharedInformerFactory,
-	cmFactory cminformers.SharedInformerFactory,
-	recorder record.EventRecorder,
-	clock clock.Clock,
-	certificateControllerOptions controllerpkg.CertificateOptions,
-	fieldManager string,
+	ctx *controllerpkg.Context,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
 
 	// obtain references to all the informers used by this controller
-	certificateInformer := cmFactory.Certmanager().V1().Certificates()
-	certificateRequestInformer := cmFactory.Certmanager().V1().CertificateRequests()
-	secretsInformer := factory.Core().V1().Secrets()
+	certificateInformer := ctx.SharedInformerFactory.Certmanager().V1().Certificates()
+	certificateRequestInformer := ctx.SharedInformerFactory.Certmanager().V1().CertificateRequests()
+	secretsInformer := ctx.KubeSharedInformerFactory.Secrets()
 
 	certificateInformer.Informer().AddEventHandler(&controllerpkg.QueuingEventHandler{Queue: queue})
 	certificateRequestInformer.Informer().AddEventHandler(&controllerpkg.BlockingEventHandler{
@@ -135,24 +126,24 @@ func NewController(
 	}
 
 	secretsManager := internal.NewSecretsManager(
-		kubeClient.CoreV1(), secretsInformer.Lister(),
-		fieldManager, certificateControllerOptions.EnableOwnerRef,
+		ctx.Client.CoreV1(), secretsInformer.Lister(),
+		ctx.FieldManager, ctx.CertificateOptions.EnableOwnerRef,
 	)
 
 	return &controller{
 		certificateLister:        certificateInformer.Lister(),
 		certificateRequestLister: certificateRequestInformer.Lister(),
 		secretLister:             secretsInformer.Lister(),
-		client:                   client,
-		recorder:                 recorder,
-		clock:                    clock,
+		client:                   ctx.CMClient,
+		recorder:                 ctx.Recorder,
+		clock:                    ctx.Clock,
 		secretsUpdateData:        secretsManager.UpdateData,
 		postIssuancePolicyChain: policies.NewSecretPostIssuancePolicyChain(
-			certificateControllerOptions.EnableOwnerRef,
-			fieldManager,
+			ctx.CertificateOptions.EnableOwnerRef,
+			ctx.FieldManager,
 		),
-		fieldManager:         fieldManager,
-		localTemporarySigner: certificates.GenerateLocallySignedTemporaryCertificate,
+		fieldManager:         ctx.FieldManager,
+		localTemporarySigner: pki.GenerateLocallySignedTemporaryCertificate,
 	}, queue, mustSync
 }
 
@@ -217,7 +208,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		logf.WithResource(log, nextPrivateKeySecret).Error(err, "failed to parse next private key, waiting for keymanager controller")
 		return nil
 	}
-	pkViolations, err := certificates.PrivateKeyMatchesSpec(pk, crt.Spec)
+	pkViolations, err := pki.PrivateKeyMatchesSpec(pk, crt.Spec)
 	if err != nil {
 		return err
 	}
@@ -251,7 +242,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 
 	// Verify the CSR options match what is requested in certificate.spec.
 	// If there are violations in the spec, then the requestmanager will handle this.
-	requestViolations, err := certificates.RequestMatchesSpec(req, crt.Spec)
+	requestViolations, err := pki.RequestMatchesSpec(req, crt.Spec)
 	if err != nil {
 		return err
 	}
@@ -278,21 +269,37 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return nil
 	}
 
-	// Some issuers won't honor the "Denied=True" condition, and we don't want
-	// to break these issuers. To avoid breaking these issuers, we skip bubbling
-	// up the "Denied=True" condition from the certificate request object to the
-	// certificate object when the issuer ignores the "Denied" state.
-	//
-	// To know whether or not an issuer ignores the "Denied" state, we pay
-	// attention to the "Ready" condition on the certificate request. If a
-	// certificate request is "Denied=True" and that the issuer still proceeds
-	// to adding the "Ready" condition (to either true or false), then we
-	// consider that this issuer has ignored the "Denied" state.
-	if crReadyCond == nil {
-		if apiutil.CertificateRequestIsDenied(req) {
-			return c.failIssueCertificate(ctx, log, crt, apiutil.GetCertificateRequestCondition(req, cmapi.CertificateRequestConditionDenied))
-		}
+	// Now check if CertificateRequest is in any of the final states so that
+	// this issuance can be completed as either succeeded or failed. Failed
+	// issuance will be retried with a delay (the logic for that lives in
+	// certificates-trigger controller). Final states are: Denied condition
+	// with status True => fail issuance InvalidRequest  condition with
+	// status True => fail issuance Ready conidtion with reason Failed =>
+	// fail issuance Ready condition with reason Issued => finalize issuance
+	// as succeeded.
 
+	// In case of a non-compliant issuer, a CertificateRequest can have both
+	// Denied status True (set by an approver) and Ready condition with
+	// reason Issued (set by the issuer). In this case, we prioritize the
+	// Denied condition and fail the issuance. This is done for consistency
+	// and also to avoid race conditions between the non-compliant issuer
+	// and this control loop.
+
+	// If the certificate request was denied, set the last failure time to
+	// now, bump the issuance attempts and set the Issuing status condition
+	// to False.
+	if apiutil.CertificateRequestIsDenied(req) {
+		return c.failIssueCertificate(ctx, log, crt, apiutil.GetCertificateRequestCondition(req, cmapi.CertificateRequestConditionDenied))
+	}
+
+	// If the certificate request is invalid, set the last failure time to
+	// now, bump the issuance attempts and set the Issuing status condition
+	// to False.
+	if apiutil.CertificateRequestHasInvalidRequest(req) {
+		return c.failIssueCertificate(ctx, log, crt, apiutil.GetCertificateRequestCondition(req, cmapi.CertificateRequestConditionInvalidRequest))
+	}
+
+	if crReadyCond == nil {
 		log.V(logf.DebugLevel).Info("CertificateRequest does not have Ready condition, waiting...")
 		return nil
 	}
@@ -383,9 +390,13 @@ func (c *controller) issueCertificate(ctx context.Context, nextRevision int, crt
 		return err
 	}
 	secretData := internal.SecretData{
-		PrivateKey:  pkData,
-		Certificate: req.Status.Certificate,
-		CA:          req.Status.CA,
+		PrivateKey:      pkData,
+		Certificate:     req.Status.Certificate,
+		CA:              req.Status.CA,
+		CertificateName: crt.Name,
+		IssuerName:      req.Spec.IssuerRef.Name,
+		IssuerKind:      req.Spec.IssuerRef.Kind,
+		IssuerGroup:     req.Spec.IssuerRef.Group,
 	}
 
 	if err := c.secretsUpdateData(ctx, crt, secretData); err != nil {
@@ -463,16 +474,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 	// construct a new named logger to be reused throughout the controller
 	log := logf.FromContext(ctx.RootContext, ControllerName)
 
-	ctrl, queue, mustSync := NewController(log,
-		ctx.Client,
-		ctx.CMClient,
-		ctx.KubeSharedInformerFactory,
-		ctx.SharedInformerFactory,
-		ctx.Recorder,
-		ctx.Clock,
-		ctx.CertificateOptions,
-		ctx.FieldManager,
-	)
+	ctrl, queue, mustSync := NewController(log, ctx)
 	c.controller = ctrl
 
 	return queue, mustSync, nil

@@ -20,15 +20,15 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/cert-manager/cert-manager/e2e-tests/framework"
+	"github.com/cert-manager/cert-manager/e2e-tests/util"
 	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/test/e2e/framework"
-	"github.com/cert-manager/cert-manager/test/e2e/util"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
@@ -163,6 +163,7 @@ var _ = framework.CertManagerDescribe("SelfSigned CertificateRequest", func() {
 			},
 		}
 		for _, v := range cases {
+			v := v // capture range variable
 			It("should generate a signed certificate valid for "+v.label, func() {
 				crClient := f.CertManagerClientSet.CertmanagerV1().CertificateRequests(f.Namespace.Name)
 
@@ -172,6 +173,7 @@ var _ = framework.CertManagerDescribe("SelfSigned CertificateRequest", func() {
 
 				_, err = crClient.Create(context.TODO(), gen.CertificateRequestFrom(basicCR,
 					gen.SetCertificateRequestCSR(csr),
+					gen.SetCertificateRequestDuration(v.inputDuration),
 				), metav1.CreateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 

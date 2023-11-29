@@ -1,3 +1,17 @@
+# Copyright 2023 The cert-manager Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 ## Set this as an environment variable to enable signing commands using cmrel.
 ## Format should be:
 ## projects/<project>/locations/<location>/keyRings/<keyring>/cryptoKeys/<keyname>/cryptoKeyVersions/<keyversion>
@@ -46,11 +60,11 @@ release: release-artifacts-signed
 ## RELEASE_TARGET_BUCKET
 ##
 ## @category Release
-upload-release: release | $(BINDIR)/tools/rclone
+upload-release: release | $(NEEDS_RCLONE)
 ifeq ($(strip $(RELEASE_TARGET_BUCKET)),)
 	$(error Trying to upload-release but RELEASE_TARGET_BUCKET is empty)
 endif
-	./$(BINDIR)/tools/rclone copyto ./$(BINDIR)/release :gcs:$(RELEASE_TARGET_BUCKET)/stage/gcb/release/$(RELEASE_VERSION)
+	$(RCLONE) copyto ./$(BINDIR)/release :gcs:$(RELEASE_TARGET_BUCKET)/stage/gcb/release/$(RELEASE_VERSION)
 
 # Takes all metadata files in $(BINDIR)/metadata and combines them into one.
 
@@ -114,5 +128,5 @@ $(BINDIR)/release $(BINDIR)/metadata:
 #	@# We cd into bin so that SHA256SUMS file doesn't have a prefix of `bin` on everything
 #	cd $(dir $@) && sha256sum $(patsubst $(BINDIR)/%,%,$^) > $(notdir $@)
 
-#$(BINDIR)/SHA256SUMS.sig: $(BINDIR)/SHA256SUMS $(BINDIR)/tools/cosign
-#	$(BINDIR)/tools/cosign sign-blob --key $(COSIGN_KEY) $< > $@
+#$(BINDIR)/SHA256SUMS.sig: $(BINDIR)/SHA256SUMS | $(NEEDS_COSIGN)
+#	$(COSIGN) sign-blob --key $(COSIGN_KEY) $< > $@

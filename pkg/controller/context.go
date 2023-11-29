@@ -26,23 +26,30 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/discovery"
-	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
+	kscheme "k8s.io/client-go/kubernetes/scheme"
 	clientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/utils/clock"
-	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	gwclient "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned"
-	gwscheme "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned/scheme"
-	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/gateway/externalversions"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gwclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gwscheme "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/scheme"
+	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
 	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	"github.com/cert-manager/cert-manager/pkg/acme/accounts"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	cmscheme "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/scheme"
 	informers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
@@ -77,12 +84,17 @@ type Context struct {
 	FieldManager string
 	// RESTConfig is the loaded Kubernetes apiserver rest client configuration
 	RESTConfig *rest.Config
+	// Scheme is the Kubernetes scheme that should be used when serialising and
+	// deserialising API objects
+	Scheme *runtime.Scheme
 	// Client is a Kubernetes clientset
 	Client kubernetes.Interface
 	// CMClient is a cert-manager clientset
 	CMClient clientset.Interface
 	// GWClient is a GatewayAPI clientset.
 	GWClient gwclient.Interface
+	// MetadataClient is a PartialObjectMetadata client
+	MetadataClient metadata.Interface
 	// DiscoveryClient is a discovery interface. Usually set to Client.Discovery unless a fake client is in use.
 	DiscoveryClient discovery.DiscoveryInterface
 
@@ -91,13 +103,18 @@ type Context struct {
 
 	// KubeSharedInformerFactory can be used to obtain shared
 	// SharedIndexInformer instances for Kubernetes types
-	KubeSharedInformerFactory kubeinformers.SharedInformerFactory
+	KubeSharedInformerFactory internalinformers.KubeInformerFactory
+
 	// SharedInformerFactory can be used to obtain shared SharedIndexInformer
-	// instances
+	// instances for cert-manager.io types
 	SharedInformerFactory informers.SharedInformerFactory
 
-	// The Gateway API is an external CRD, which means its shared informers are
-	// not available in controllerpkg.Context.
+	// HTTP01ResourceMetadataInformersFactory is a metadata only informers
+	// factory with a http-01 resource label filter selector
+	HTTP01ResourceMetadataInformersFactory metadatainformer.SharedInformerFactory
+
+	// GWShared can be used to obtain SharedIndexInformer instances for
+	// gateway.networking.k8s.io types
 	GWShared             gwinformers.SharedInformerFactory
 	GatewaySolverEnabled bool
 
@@ -169,6 +186,9 @@ type ACMEOptions struct {
 
 	// HTTP01SolverResourceLimitsMemory defines the ACME pod's resource limits Memory size
 	HTTP01SolverResourceLimitsMemory resource.Quantity
+
+	// ACMEHTTP01SolverRunAsNonRoot sets the ACME pod's ability to run as root
+	ACMEHTTP01SolverRunAsNonRoot bool
 
 	// HTTP01SolverNameservers is a list of nameservers to use when performing self-checks
 	// for ACME HTTP01 validations.
@@ -261,20 +281,42 @@ func NewContextFactory(ctx context.Context, opts ContextOptions) (*ContextFactor
 	}
 
 	sharedInformerFactory := informers.NewSharedInformerFactoryWithOptions(clients.cmClient, resyncPeriod, informers.WithNamespace(opts.Namespace))
-	kubeSharedInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(clients.kubeClient, resyncPeriod, kubeinformers.WithNamespace(opts.Namespace))
+
+	var kubeSharedInformerFactory internalinformers.KubeInformerFactory
+	if utilfeature.DefaultFeatureGate.Enabled(feature.SecretsFilteredCaching) {
+		kubeSharedInformerFactory = internalinformers.NewFilteredSecretsKubeInformerFactory(ctx, clients.kubeClient, clients.metadataOnlyClient, resyncPeriod, opts.Namespace)
+	} else {
+		kubeSharedInformerFactory = internalinformers.NewBaseKubeInformerFactory(clients.kubeClient, resyncPeriod, opts.Namespace)
+	}
+	r, err := labels.NewRequirement(cmacme.DomainLabelKey, selection.Exists, nil)
+	if err != nil {
+		panic(fmt.Errorf("internal error: failed to build label selector to filter HTTP-01 challenge resources: %w", err))
+	}
+	isHTTP01ChallengeResourceLabelSelector := labels.NewSelector().Add(*r)
+	http01ResourceMetadataInformerFactory := metadatainformer.NewFilteredSharedInformerFactory(clients.metadataOnlyClient, resyncPeriod, opts.Namespace, func(listOptions *metav1.ListOptions) {
+		// metadataInformersFactory is at the moment only used for pods
+		// and services for http-01 challenge which can be identified by
+		// the same label keys, so it is okay to set the label selector
+		// here. If we start using it for other resources then we'll
+		// have to set the selectors on individual informers instead.
+		listOptions.LabelSelector = isHTTP01ChallengeResourceLabelSelector.String()
+
+	})
+
 	gwSharedInformerFactory := gwinformers.NewSharedInformerFactoryWithOptions(clients.gwClient, resyncPeriod, gwinformers.WithNamespace(opts.Namespace))
 
 	return &ContextFactory{
 		baseRestConfig: restConfig,
 		log:            logf.FromContext(ctx),
 		ctx: &Context{
-			RootContext:               ctx,
-			StopCh:                    ctx.Done(),
-			KubeSharedInformerFactory: kubeSharedInformerFactory,
-			SharedInformerFactory:     sharedInformerFactory,
-			GWShared:                  gwSharedInformerFactory,
-			GatewaySolverEnabled:      clients.gatewayAvailable,
-			ContextOptions:            opts,
+			RootContext:                            ctx,
+			StopCh:                                 ctx.Done(),
+			KubeSharedInformerFactory:              kubeSharedInformerFactory,
+			SharedInformerFactory:                  sharedInformerFactory,
+			GWShared:                               gwSharedInformerFactory,
+			GatewaySolverEnabled:                   clients.gatewayAvailable,
+			HTTP01ResourceMetadataInformersFactory: http01ResourceMetadataInformerFactory,
+			ContextOptions:                         opts,
 		},
 	}, nil
 }
@@ -284,6 +326,11 @@ func NewContextFactory(ctx context.Context, opts ContextOptions) (*ContextFactor
 func (c *ContextFactory) Build(component ...string) (*Context, error) {
 	restConfig := util.RestConfigWithUserAgent(c.baseRestConfig, component...)
 
+	scheme := runtime.NewScheme()
+	kscheme.AddToScheme(scheme)
+	cmscheme.AddToScheme(scheme)
+	gwscheme.AddToScheme(scheme)
+
 	clients, err := buildClients(restConfig)
 	if err != nil {
 		return nil, err
@@ -292,20 +339,21 @@ func (c *ContextFactory) Build(component ...string) (*Context, error) {
 	// Create event broadcaster.
 	// Add cert-manager types to the default Kubernetes Scheme so Events can be
 	// logged properly.
-	cmscheme.AddToScheme(scheme.Scheme)
-	gwscheme.AddToScheme(scheme.Scheme)
+
 	c.log.V(logf.DebugLevel).Info("creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(logf.WithInfof(c.log.V(logf.DebugLevel)).Infof)
 	eventBroadcaster.StartRecordingToSink(&clientv1.EventSinkImpl{Interface: clients.kubeClient.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: util.PrefixFromUserAgent(restConfig.UserAgent)})
+	recorder := eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: util.PrefixFromUserAgent(restConfig.UserAgent)})
 
 	ctx := *c.ctx
 	ctx.FieldManager = util.PrefixFromUserAgent(restConfig.UserAgent)
 	ctx.RESTConfig = restConfig
+	ctx.Scheme = scheme
 	ctx.Client = clients.kubeClient
 	ctx.CMClient = clients.cmClient
 	ctx.GWClient = clients.gwClient
+	ctx.MetadataClient = clients.metadataOnlyClient
 	ctx.DiscoveryClient = clients.kubeClient.Discovery()
 	ctx.Recorder = recorder
 
@@ -314,25 +362,37 @@ func (c *ContextFactory) Build(component ...string) (*Context, error) {
 
 // contextClients is a helper struct containing API clients.
 type contextClients struct {
-	kubeClient       kubernetes.Interface
-	cmClient         clientset.Interface
-	gwClient         gwclient.Interface
-	gatewayAvailable bool
+	kubeClient         kubernetes.Interface
+	cmClient           clientset.Interface
+	gwClient           gwclient.Interface
+	metadataOnlyClient metadata.Interface
+	gatewayAvailable   bool
 }
 
 // buildClients builds all required clients for the context using the given
 // REST config.
 func buildClients(restConfig *rest.Config) (contextClients, error) {
-	// Create a cert-manager api client
-	cmClient, err := clientset.NewForConfig(restConfig)
+	httpClient, err := rest.HTTPClientFor(restConfig)
 	if err != nil {
-		return contextClients{}, fmt.Errorf("error creating internal group client: %w", err)
+		return contextClients{}, fmt.Errorf("error creating HTTP client: %w", err)
+	}
+
+	// Create a cert-manager api client
+	cmClient, err := clientset.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		return contextClients{}, fmt.Errorf("error creating cert-manager client: %w", err)
 	}
 
 	// Create a Kubernetes api client
-	kubeClient, err := kubernetes.NewForConfig(restConfig)
+	kubeClient, err := kubernetes.NewForConfigAndClient(restConfig, httpClient)
 	if err != nil {
 		return contextClients{}, fmt.Errorf("error creating kubernetes client: %w", err)
+	}
+
+	// create a metadata-only client
+	metadataOnlyClient, err := metadata.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		return contextClients{}, fmt.Errorf("error creating metadata-only client: %w", err)
 	}
 
 	var gatewayAvailable bool
@@ -357,10 +417,10 @@ func buildClients(restConfig *rest.Config) (contextClients, error) {
 	}
 
 	// Create a GatewayAPI client.
-	gwClient, err := gwclient.NewForConfig(restConfig)
+	gwClient, err := gwclient.NewForConfigAndClient(restConfig, httpClient)
 	if err != nil {
 		return contextClients{}, fmt.Errorf("error creating kubernetes client: %w", err)
 	}
 
-	return contextClients{kubeClient, cmClient, gwClient, gatewayAvailable}, nil
+	return contextClients{kubeClient, cmClient, gwClient, metadataOnlyClient, gatewayAvailable}, nil
 }

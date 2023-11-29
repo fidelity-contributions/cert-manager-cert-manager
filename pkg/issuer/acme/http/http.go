@@ -29,10 +29,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	corev1listers "k8s.io/client-go/listers/core/v1"
 	networkingv1listers "k8s.io/client-go/listers/networking/v1"
+	"k8s.io/client-go/tools/cache"
 	k8snet "k8s.io/utils/net"
-	gwapilisters "sigs.k8s.io/gateway-api/pkg/client/listers/gateway/apis/v1alpha2"
+	gwapilisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 
 	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -59,8 +59,8 @@ var (
 type Solver struct {
 	*controller.Context
 
-	podLister       corev1listers.PodLister
-	serviceLister   corev1listers.ServiceLister
+	podLister       cache.GenericLister
+	serviceLister   cache.GenericLister
 	ingressLister   networkingv1listers.IngressLister
 	httpRouteLister gwapilisters.HTTPRouteLister
 
@@ -74,10 +74,10 @@ type reachabilityTest func(ctx context.Context, url *url.URL, key string, dnsSer
 func NewSolver(ctx *controller.Context) (*Solver, error) {
 	return &Solver{
 		Context:          ctx,
-		podLister:        ctx.KubeSharedInformerFactory.Core().V1().Pods().Lister(),
-		serviceLister:    ctx.KubeSharedInformerFactory.Core().V1().Services().Lister(),
-		ingressLister:    ctx.KubeSharedInformerFactory.Networking().V1().Ingresses().Lister(),
-		httpRouteLister:  ctx.GWShared.Gateway().V1alpha2().HTTPRoutes().Lister(),
+		podLister:        ctx.HTTP01ResourceMetadataInformersFactory.ForResource(corev1.SchemeGroupVersion.WithResource("pods")).Lister(),
+		serviceLister:    ctx.HTTP01ResourceMetadataInformersFactory.ForResource(corev1.SchemeGroupVersion.WithResource("services")).Lister(),
+		ingressLister:    ctx.KubeSharedInformerFactory.Ingresses().Lister(),
+		httpRouteLister:  ctx.GWShared.Gateway().V1beta1().HTTPRoutes().Lister(),
 		testReachability: testReachability,
 		requiredPasses:   5,
 	}, nil
@@ -108,19 +108,19 @@ func (s *Solver) Present(ctx context.Context, issuer v1.GenericIssuer, ch *cmacm
 	log := logf.FromContext(ctx).WithName(loggerName)
 	ctx = logf.NewContext(ctx, log)
 
-	_, podErr := s.ensurePod(ctx, ch)
-	svc, svcErr := s.ensureService(ctx, ch)
+	podErr := s.ensurePod(ctx, ch)
+	svcName, svcErr := s.ensureService(ctx, ch)
 	if svcErr != nil {
 		return utilerrors.NewAggregate([]error{podErr, svcErr})
 	}
 	var ingressErr, gatewayErr error
 	if ch.Spec.Solver.HTTP01 != nil {
 		if ch.Spec.Solver.HTTP01.Ingress != nil {
-			_, ingressErr = s.ensureIngress(ctx, ch, svc.Name)
+			_, ingressErr = s.ensureIngress(ctx, ch, svcName)
 			return utilerrors.NewAggregate([]error{podErr, svcErr, ingressErr})
 		}
 		if ch.Spec.Solver.HTTP01.GatewayHTTPRoute != nil {
-			_, gatewayErr = s.ensureGatewayHTTPRoute(ctx, ch, svc.Name)
+			_, gatewayErr = s.ensureGatewayHTTPRoute(ctx, ch, svcName)
 			return utilerrors.NewAggregate([]error{podErr, svcErr, gatewayErr})
 		}
 	}
@@ -166,7 +166,11 @@ func (s *Solver) Check(ctx context.Context, issuer v1.GenericIssuer, ch *cmacme.
 			return err
 		}
 		log.V(logf.DebugLevel).Info("reachability test passed, re-checking in 2s time")
-		time.Sleep(time.Second * 2)
+
+		if i != s.requiredPasses-1 {
+			// sleep for 2s between checks
+			time.Sleep(time.Second * 2)
+		}
 	}
 
 	log.V(logf.DebugLevel).Info("self check succeeded")
@@ -290,13 +294,13 @@ func testReachability(ctx context.Context, url *url.URL, key string, dnsServers 
 		log.V(logf.DebugLevel).Info("failed to perform self check GET request", "error", err)
 		return fmt.Errorf("failed to perform self check GET request '%s': %v", url, err)
 	}
+	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		log.V(logf.DebugLevel).Info("received HTTP status code was not StatusOK (200)", "code", response.StatusCode)
 		return fmt.Errorf("wrong status code '%d', expected '%d'", response.StatusCode, http.StatusOK)
 	}
 
-	defer response.Body.Close()
 	presentedKey, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.V(logf.DebugLevel).Info("failed to decode response body", "error", err)

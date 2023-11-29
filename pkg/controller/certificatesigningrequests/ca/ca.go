@@ -26,9 +26,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
 
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
@@ -52,7 +52,7 @@ type signingFn func([]*x509.Certificate, crypto.Signer, *x509.Certificate) (pki.
 // or ClusterIssuer
 type CA struct {
 	issuerOptions controllerpkg.IssuerOptions
-	secretsLister corelisters.SecretLister
+	secretsLister internalinformers.SecretLister
 
 	certClient certificatesclient.CertificateSigningRequestInterface
 
@@ -78,11 +78,11 @@ func init() {
 func NewCA(ctx *controllerpkg.Context) certificatesigningrequests.Signer {
 	return &CA{
 		issuerOptions:     ctx.IssuerOptions,
-		secretsLister:     ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
+		secretsLister:     ctx.KubeSharedInformerFactory.Secrets().Lister(),
 		certClient:        ctx.Client.CertificatesV1().CertificateSigningRequests(),
 		fieldManager:      ctx.FieldManager,
 		recorder:          ctx.Recorder,
-		templateGenerator: pki.GenerateTemplateFromCertificateSigningRequest,
+		templateGenerator: pki.CertificateTemplateFromCertificateSigningRequest,
 		signingFn:         pki.SignCSRTemplate,
 	}
 }
@@ -129,6 +129,7 @@ func (c *CA) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningReq
 
 	template.CRLDistributionPoints = issuerObj.GetSpec().CA.CRLDistributionPoints
 	template.OCSPServer = issuerObj.GetSpec().CA.OCSPServers
+	template.IssuingCertificateURL = issuerObj.GetSpec().CA.IssuingCertificateURLs
 
 	bundle, err := c.signingFn(caCerts, caKey, template)
 	if err != nil {

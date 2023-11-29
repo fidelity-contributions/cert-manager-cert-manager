@@ -23,8 +23,9 @@ import (
 	"fmt"
 
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	corelisters "k8s.io/client-go/listers/core/v1"
 
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
@@ -33,6 +34,7 @@ import (
 	issuerpkg "github.com/cert-manager/cert-manager/pkg/issuer"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	cmerrors "github.com/cert-manager/cert-manager/pkg/util/errors"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 	"github.com/cert-manager/cert-manager/pkg/util/kube"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
@@ -46,7 +48,7 @@ type signingFn func([]*x509.Certificate, crypto.Signer, *x509.Certificate) (pki.
 
 type CA struct {
 	issuerOptions controllerpkg.IssuerOptions
-	secretsLister corelisters.SecretLister
+	secretsLister internalinformers.SecretLister
 
 	reporter *crutil.Reporter
 
@@ -66,11 +68,17 @@ func init() {
 
 func NewCA(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &CA{
-		issuerOptions:     ctx.IssuerOptions,
-		secretsLister:     ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
-		reporter:          crutil.NewReporter(ctx.Clock, ctx.Recorder),
-		templateGenerator: pki.GenerateTemplateFromCertificateRequest,
-		signingFn:         pki.SignCSRTemplate,
+		issuerOptions: ctx.IssuerOptions,
+		secretsLister: ctx.KubeSharedInformerFactory.Secrets().Lister(),
+		reporter:      crutil.NewReporter(ctx.Clock, ctx.Recorder),
+		templateGenerator: func(cr *cmapi.CertificateRequest) (*x509.Certificate, error) {
+			if !utilfeature.DefaultMutableFeatureGate.Enabled(feature.DisallowInsecureCSRUsageDefinition) {
+				return pki.DeprecatedCertificateTemplateFromCertificateRequestAndAllowInsecureCSRUsageDefinition(cr)
+			}
+
+			return pki.CertificateTemplateFromCertificateRequest(cr)
+		},
+		signingFn: pki.SignCSRTemplate,
 	}
 }
 
@@ -120,6 +128,7 @@ func (c *CA) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerObj c
 
 	template.CRLDistributionPoints = issuerObj.GetSpec().CA.CRLDistributionPoints
 	template.OCSPServer = issuerObj.GetSpec().CA.OCSPServers
+	template.IssuingCertificateURL = issuerObj.GetSpec().CA.IssuingCertificateURLs
 
 	bundle, err := c.signingFn(caCerts, caKey, template)
 	if err != nil {
